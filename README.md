@@ -9,6 +9,279 @@ Proxmox VE 9 – Vollautomatischer Unattended Install + Cluster-Setup via Ansibl
 | `01_build_iso.yml` | Baut eine Unattended-ISO via `proxmox-auto-install-assistant` |
 | `02_base_setup.yml` | Node-Setup (Repos, Netzwerk, SDN) + Cluster-Init |
 
+---
+
+## Voraussetzungen – `iso_builder` System
+
+Der ISO-Builder läuft auf `localhost` (Ansible-Controller) mit
+`ansible_connection: local`. Das bedeutet: **alle Abhängigkeiten müssen auf
+dem Rechner installiert sein, von dem aus das Playbook gestartet wird** –
+nicht auf den PVE-Nodes.
+
+### Betriebssystem
+
+| Anforderung | Details |
+|---|---|
+| **OS** | Debian 12 (Bookworm) oder Ubuntu 22.04/24.04 LTS empfohlen |
+| **Arch** | `amd64` – `proxmox-auto-install-assistant` ist nur für x86_64 verfügbar |
+| **Nicht unterstützt** | macOS, Windows (WSL2 geht, aber ungetestet) |
+
+> **Hinweis:** Das Playbook prüft `ansible_os_family == "Debian"` und
+> bricht bei anderen OS-Familien ab.
+
+### Ansible-Version
+
+```bash
+ansible --version
+# Mindestanforderung: core 2.15+
+# Empfohlen:          core 2.17+
+```
+
+Collections werden automatisch aus `requirements.yml` installiert:
+
+```bash
+ansible-galaxy collection install -r requirements.yml
+```
+
+Installierte Collections nach dem Befehl:
+
+| Collection | Wofür |
+|---|---|
+| `community.proxmox` | Vorbereitet für VM-Provisioning (noch nicht aktiv für Netzwerk) |
+| `ansible.posix` | `authorized_key`-Modul für SSH-Key-Austausch im Cluster-Join |
+
+### Systempakete auf dem iso_builder Host
+
+Das Playbook installiert fehlende Pakete via `apt` automatisch (`become: true`).
+Voraussetzung ist jedoch, dass das **APT-Repository für `proxmox-auto-install-assistant`**
+erreichbar ist.
+
+#### Auf einem Proxmox VE Node (empfohlen)
+
+Das Paket ist im Standard-PVE-Repo enthalten – keine zusätzliche Konfiguration nötig.
+
+#### Auf einem regulären Debian/Ubuntu System (Controller ist kein PVE-Node)
+
+Das Paket `proxmox-auto-install-assistant` stammt aus dem Proxmox-Repo und ist
+**nicht** in den Standard-Debian/Ubuntu-Quellen enthalten. APT-Quelle manuell
+hinzufügen:
+
+```bash
+# Proxmox GPG-Key importieren
+curl -fsSL https://enterprise.proxmox.com/debian/proxmox-release-bookworm.gpg \
+  | sudo gpg --dearmor -o /etc/apt/trusted.gpg.d/proxmox-release-bookworm.gpg
+
+# No-Subscription-Repo hinzufügen (kein Proxmox-Account nötig)
+echo "deb http://download.proxmox.com/debian/pve bookworm pve-no-subscription" \
+  | sudo tee /etc/apt/sources.list.d/pve-no-subscription.list
+
+sudo apt update
+sudo apt install proxmox-auto-install-assistant wget whois
+```
+
+> Für Ubuntu 24.04 (`noble`) analog mit `noble` statt `bookworm`.
+> Prüfe die aktuellen Repo-URLs unter: https://pve.proxmox.com/wiki/Package_Repositories
+
+#### Manuelle Vorabinstallation prüfen
+
+```bash
+# Prüfen ob alle benötigten Pakete vorhanden sind:
+dpkg -l proxmox-auto-install-assistant wget whois 2>/dev/null | grep '^ii'
+
+# Verify: Tool funktioniert
+proxmox-auto-install-assistant --version
+```
+
+### Python-Anforderungen
+
+```bash
+# Mindestversion: Python 3.9+
+python3 --version
+
+# Benötigte Stdlib-Module (immer vorhanden):
+# - json, os, subprocess, tempfile
+# Keine zusätzlichen pip-Pakete erforderlich.
+```
+
+### Netzwerk / Connectivity
+
+Das Playbook braucht folgende ausgehende Verbindungen vom iso_builder Host:
+
+| Ziel | Port | Wofür | Pflicht? |
+|---|---|---|---|
+| `enterprise.proxmox.com` | 443/TCP | ISO-Download (`pve_iso_url`) | Nur wenn `pve_iso_download: true` |
+| `download.proxmox.com` | 80/TCP | APT-Repo für Paketinstall | Nur wenn Pakete fehlen |
+| DNS-Auflösung | 53/UDP+TCP | Hostnamen auflösen | Ja |
+
+Wenn der Controller hinter einem **HTTP-Proxy** liegt:
+
+```bash
+# Vor dem Playbook-Aufruf setzen:
+export http_proxy="http://proxy.example.local:3128"
+export https_proxy="http://proxy.example.local:3128"
+export no_proxy="localhost,127.0.0.1,192.168.0.0/16"
+```
+
+Wenn der ISO-Download nicht möglich ist (Air-Gap), ISO manuell ablegen und
+Download deaktivieren:
+
+```yaml
+# group_vars/all.yml
+pve_iso_download: false
+pve_iso_output_dir:  "/srv/isos"
+pve_iso_filename:    "proxmox-ve_9.1-1.iso"   # muss dort liegen
+```
+
+### Ausgabeverzeichnis
+
+```bash
+# Default: /tmp/pve-iso-build  (aus group_vars/all.yml → pve_iso_output_dir)
+# Das Verzeichnis muss:
+#   - existieren ODER durch den Ansible-User mit become: false anlegbar sein
+#   - min. ~6 GB freien Speicher haben (Quell-ISO ~1.4 GB + Output-ISO pro Node)
+df -h /tmp
+```
+
+---
+
+### Variablen-Checkliste vor `01_build_iso.yml`
+
+Das Playbook prüft Pflichtfelder in `pre_tasks` mit `assert` und bricht
+mit einer klaren Fehlermeldung ab, wenn etwas fehlt.
+
+#### Pflicht – Playbook bricht ohne diese Werte ab
+
+| Variable | Datei | Beispielwert | Beschreibung |
+|---|---|---|---|
+| `pve_root_password_hashed` | `group_vars/all.yml` | `$y$j9T$...` | yescrypt-Hash, **nicht** Klartext |
+| `pve_root_ssh_keys` | `group_vars/all.yml` | `["ssh-ed25519 AAAA..."]` | Mind. 1 SSH Public Key |
+| `pve_iso_url` | `group_vars/all.yml` | `https://enterprise.proxmox.com/iso/proxmox-ve_9.1-1.iso` | Quell-ISO URL |
+| `pve_iso_filename` | `group_vars/all.yml` | `proxmox-ve_9.1-1.iso` | Dateiname der Quell-ISO |
+
+#### Pflicht pro Node – in `host_vars/<hostname>.yml`
+
+| Variable | Beispielwert | Beschreibung |
+|---|---|---|
+| `pve_node_ip` | `192.168.10.11` | Statische Management-IP nach Install |
+| `pve_node_cidr_prefix` | `24` | Prefix-Länge (nicht Netmask) |
+| `pve_node_gw` | `192.168.10.1` | Default Gateway |
+| `pve_node_dns` | `192.168.10.1` | DNS-Server |
+| `pve_nic_aliases` | siehe unten | MAC → Alias → Bond-Rolle (bond0/bond1/bond2) |
+
+```yaml
+# Minimales host_vars-Beispiel für ISO-Bau:
+pve_node_ip:          "192.168.10.11"
+pve_node_cidr_prefix: "24"
+pve_node_gw:          "192.168.10.1"
+pve_node_dns:         "192.168.10.1"
+
+pve_nic_aliases:
+  - mac:   "aa:bb:cc:01:01:01"   # Management NIC 1 (aus IPMI/LLDP)
+    alias: "node01-mgmt-a"
+    role:  "bond0"
+  - mac:   "aa:bb:cc:01:01:02"   # Management NIC 2
+    alias: "node01-mgmt-b"
+    role:  "bond0"
+```
+
+#### Optional – sinnvoll anzupassen
+
+| Variable | Default | Beschreibung |
+|---|---|---|
+| `pve_disk_filesystem` | `zfs` | `zfs`, `ext4`, `xfs`, `btrfs` |
+| `pve_disk_zfs_raid` | `raid1` | `raid0`, `raid1`, `raid10`, `raidz`, `raidz2`, `raidz3` |
+| `pve_disk_filter_key` | `ID_MODEL` | udev-Attribut für Disk-Auswahl |
+| `pve_disk_filter_value` | `Samsung*` | Glob-Pattern, z. B. `SAMSUNG*` oder `WD*` |
+| `pve_disk_list` | nicht gesetzt | Explizite Liste: `["sda","sdb"]` – überschreibt Filter |
+| `pve_iso_download` | `true` | `false` = ISO bereits vorhanden |
+| `pve_iso_validate_answer` | `true` | `false` = answer.toml-Validierung überspringen |
+| `pve_answer_fetch_from` | `iso` | `iso` \| `partition` \| `http` |
+| `pve_timezone` | `Europe/Berlin` | Zeitzone des installierten Systems |
+| `pve_keyboard` | `de` | Tastaturlayout |
+| `pve_mailto` | `admin@example.local` | E-Mail für PVE-Benachrichtigungen |
+
+#### Disk-Filter richtig setzen
+
+Der `answer.toml`-Installer wählt Ziel-Disks anhand eines udev-Attributs aus.
+Den korrekten Wert ermitteln **am laufenden System** (oder via Rescue-OS):
+
+```bash
+# Alle relevanten udev-Attribute einer Disk anzeigen:
+udevadm info --query=all --name=/dev/sda | grep -E "ID_MODEL|ID_SERIAL|ID_VENDOR|ID_PATH"
+
+# Beispielausgabe:
+# E: ID_MODEL=Samsung_SSD_870
+# E: ID_SERIAL=S5ESNX0R123456
+# E: ID_VENDOR=Samsung
+
+# Disk-Devices auf dem System:
+proxmox-auto-install-assistant device-info -t disk
+```
+
+Bei **unbekannten oder gemischten Disks** ist die explizite Liste sicherer:
+
+```yaml
+# host_vars/<hostname>.yml
+pve_disk_list: ["sda", "sdb"]   # Überschreibt pve_disk_filter_*
+```
+
+---
+
+### Schritt-für-Schritt: ISO-Builder vorbereiten
+
+```bash
+# 1. Repo klonen
+git clone https://github.com/pro-data-alb/pve-ansible-setup.git
+cd pve-ansible-setup
+
+# 2. Collections installieren
+ansible-galaxy collection install -r requirements.yml
+
+# 3. proxmox-auto-install-assistant verfügbar? (falls nicht: Repo oben hinzufügen)
+proxmox-auto-install-assistant --version
+
+# 4. Root-Passwort-Hash erzeugen
+mkpasswd --method=yescrypt
+# Ausgabe (Beispiel): $y$j9T$abcdef...
+# → in group_vars/all.yml: pve_root_password_hashed: "$y$j9T$abcdef..."
+
+# 5. SSH Public Key des Controllers eintragen
+cat ~/.ssh/id_ed25519.pub
+# → in group_vars/all.yml: pve_root_ssh_keys: ["ssh-ed25519 AAAA..."]
+
+# 6. host_vars für jeden Node anlegen (IP + MACs)
+cp host_vars/pve-alpha-01.yml host_vars/pve-alpha-02.yml
+# ... anpassen
+
+# 7. Sensitive Variablen verschlüsseln (Produktion)
+ansible-vault encrypt_string '$y$j9T$...' --name 'pve_root_password_hashed'
+# → Ausgabe direkt in group_vars/all.yml einfügen
+
+# 8. Dry-Run (prüft Templates + Variablen, baut keine ISO)
+ansible-playbook 01_build_iso.yml --check
+
+# 9. ISO bauen
+ansible-playbook 01_build_iso.yml
+# Mit Vault-Passwort:
+ansible-playbook 01_build_iso.yml --ask-vault-pass
+```
+
+---
+
+### Troubleshooting – häufige Fehlerquellen
+
+| Fehlermeldung | Ursache | Lösung |
+|---|---|---|
+| `pve_root_password_hashed fehlt oder ist noch Platzhalter` | `CHANGEME` noch im Hash | `mkpasswd --method=yescrypt` ausführen |
+| `pve_root_ssh_keys enthält keinen SSH Public Key` | Liste leer | Public Key aus `~/.ssh/id_ed25519.pub` eintragen |
+| `E: Package 'proxmox-auto-install-assistant' not found` | PVE-APT-Repo fehlt | Repo-Anleitung oben folgen |
+| `Quell-ISO nicht gefunden` | Download fehlgeschlagen oder `pve_iso_download: false` ohne ISO | URL prüfen oder ISO manuell ablegen |
+| `validate-answer: ERROR` | Ungültige `answer.toml` | Disk-Filter, IPs oder Pflichtfelder in `host_vars` prüfen |
+| `No space left on device` | `/tmp` zu voll | `pve_iso_output_dir: "/srv/isos"` auf größere Partition umleiten |
+| `proxmox-auto-install-assistant: command not found` | Paket fehlt trotz `apt install` | `which proxmox-auto-install-assistant` und `$PATH` prüfen |
+
+---
+
 ## Netzwerk-Strategie (dreistufig)
 
 Interfacenamen (`eno1`, `ens1f0`, ...) sind hardware- und treiberabhängig und
@@ -83,13 +356,6 @@ pve-ansible-setup/
 
 ## Schnellstart
 
-### 0. Voraussetzungen
-
-```bash
-# Collections installieren
-ansible-galaxy collection install -r requirements.yml
-```
-
 ### 1. MAC-Adressen vorab auslesen
 
 Vor der Erstinstallation MACs aus IPMI oder Switch-LLDP auslesen:
@@ -107,7 +373,7 @@ ip link show | grep 'link/ether'
 
 ### 2. host_vars befüllen
 
-Fur jeden Node `host_vars/<hostname>.yml` anlegen:
+Für jeden Node `host_vars/<hostname>.yml` anlegen:
 
 ```yaml
 pve_node_ip:          "192.168.10.11"
@@ -140,7 +406,7 @@ mkpasswd --method=yescrypt
 
 ```bash
 ansible-playbook 01_build_iso.yml
-# Erzeugt pro Node eine ISO unter /tmp/pve-<hostname>.iso
+# Erzeugt pro Node eine ISO unter /tmp/pve-iso-build/
 ```
 
 ### 5. ISO flashen und Node booten
