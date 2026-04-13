@@ -1,4 +1,3 @@
----
 # =============================================================================
 # Playbook 00 – Distrobox iso-builder vorbereiten
 #
@@ -73,10 +72,11 @@
       changed_when: false
 
     # -- 3. apt update ---------------------------------------------------------
+    # FIX Step 1: Tippfehler "changed_wen" → "changed_when" (war Parser-Fehler)
     - name: "distrobox | apt-get update"
       ansible.builtin.command:
         cmd: distrobox enter {{ distrobox_name }} -- sudo apt-get update -qq
-      changed_wen: false
+      changed_when: false
 
     # -- 4. Basispakete installieren ------------------------------------------
     - name: "distrobox | Basispakete installieren"
@@ -101,6 +101,7 @@
           distrobox enter {{ distrobox_name }} --
           sudo wget -q {{ pve_keyring_url }} -O {{ pve_keyring_dest }}
       when: _keyring_check.rc != 0
+      changed_when: true
 
     # -- 6. Proxmox-Repo via Staging-Datei im geteilten Home -----------------
     - name: "distrobox | pve.sources: Existenz im Container prüfen"
@@ -128,6 +129,7 @@
           distrobox enter {{ distrobox_name }} --
           sudo cp {{ pve_sources_staging }} {{ pve_sources_dest }}
       when: _sources_check.rc != 0
+      changed_when: true
 
     - name: "distrobox | Staging-Datei aufräumen"
       ansible.builtin.file:
@@ -156,20 +158,10 @@
       register: _aia_ver
       changed_when: false
 
-    # -- 8. inventory/hosts.yml: iso_builder auf connection: local sichern ----
-    - name: "distrobox | inventory: ansible_connection = local setzen"
-      ansible.builtin.lineinfile:
-        path: "{{ playbook_dir }}/inventory/hosts.yml"
-        regexp: '^\s+ansible_connection:.*'
-        line: '          ansible_connection: local'
-        insertafter: '^\s+localhost:'
-
-    - name: "distrobox | inventory: ansible_python_interpreter setzen"
-      ansible.builtin.lineinfile:
-        path: "{{ playbook_dir }}/inventory/hosts.yml"
-        regexp: '^\s+ansible_python_interpreter:.*'
-        line: '          ansible_python_interpreter: /usr/bin/python3'
-        insertafter: '^\s+ansible_connection: local'
+    # -- 8. inventory/hosts.yml: ansible_python_interpreter wird direkt im
+    #       Inventory gesetzt (inventory/hosts.yml) – kein lineinfile nötig.
+    #       FIX Step 2: lineinfile-Tasks entfernt (waren nicht idempotent und
+    #       konnten bei mehrfacher Ausführung doppelte Zeilen erzeugen).
 
     # -- 9. ansible-galaxy collections im Container installieren --------------
     - name: "distrobox | ansible-galaxy collection install"
