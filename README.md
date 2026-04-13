@@ -6,6 +6,7 @@ Proxmox VE 9 – Vollautomatischer Unattended Install + Cluster-Setup via Ansibl
 
 | Playbook | Zweck |
 |---|---|
+| `00_setup_distrobox.yml` | Debian-13-Distrobox als `iso_builder` vorbereiten (distributions-agnostisch) |
 | `01_build_iso.yml` | Baut eine Unattended-ISO via `proxmox-auto-install-assistant` |
 | `02_base_setup.yml` | Node-Setup (Repos, Netzwerk, SDN) + Cluster-Init |
 
@@ -81,6 +82,19 @@ sudo apt install proxmox-auto-install-assistant wget whois
 
 > Für Ubuntu 24.04 (`noble`) analog mit `noble` statt `bookworm`.
 > Prüfe die aktuellen Repo-URLs unter: https://pve.proxmox.com/wiki/Package_Repositories
+
+#### Auf Fedora / openSUSE / Arch / beliebiger Distribution – via Distrobox
+
+Für Nicht-Debian-Systeme bietet sich eine **Debian-13-Distrobox** als
+`iso_builder`-Umgebung an. Ansible **und** `proxmox-auto-install-assistant`
+laufen dann vollständig im Container – `ansible_connection: local` macht
+SSH überflüssig. Das Setup-Playbook `00_setup_distrobox.yml` automatisiert
+den gesamten Prozess.
+
+> Distrobox mounted `$HOME` des Hosts automatisch in den Container –
+> die fertige ISO ist ohne manuelles Volume-Mapping sofort auf dem Host sichtbar.
+
+Details und Schritt-für-Schritt-Anleitung: siehe **[Distrobox-Setup](#distrobox-setup-auf-beliebiger-distribution)** am Ende dieses Dokuments.
 
 #### Manuelle Vorabinstallation prüfen
 
@@ -332,6 +346,7 @@ Switch-LLDP.
 pve-ansible-setup/
 ├── ansible.cfg
 ├── requirements.yml              # community.proxmox + ansible.posix
+├── 00_setup_distrobox.yml        # Distrobox iso-builder vorbereiten
 ├── 01_build_iso.yml
 ├── 02_base_setup.yml
 ├── inventory/
@@ -475,3 +490,113 @@ Folgende Variablen müssen verschlüsselt werden:
   (kein Reboot nötig für den ersten Ansible-Lauf).
 - Switch-Ports müssen vor dem Booten im LACP-Trunk-Mode sein,
   sonst bleibt bond0 im degraded-Mode bis zum nächsten LACPDU-Zyklus.
+
+---
+
+## Distrobox-Setup auf beliebiger Distribution
+
+Für alle Nicht-Debian-Systeme (Fedora, openSUSE, Arch, etc.) stellt
+`00_setup_distrobox.yml` eine vollautomatische Einrichtung einer
+Debian-13-Distrobox als `iso_builder`-Umgebung bereit.
+
+### Funktionsweise
+
+| Schritt | Was passiert |
+|---|---|
+| Container anlegen | `debian:trixie` via distrobox create |
+| Basispakete | `wget`, `gpg`, `python3`, `ansible`, `git`, `whois` via apt |
+| Proxmox GPG-Key | Download nach `/usr/share/keyrings/` im Container |
+| Proxmox-Repo | `pve-no-subscription` (Trixie) via deb822-Format |
+| `proxmox-auto-install-assistant` | apt install + Smoke-Test |
+| inventory patch | `ansible_connection: local` + `ansible_python_interpreter` |
+| Collections | `ansible-galaxy collection install -r requirements.yml` im Container |
+
+### Voraussetzungen auf dem Host
+
+```bash
+# Fedora
+sudo dnf install -y distrobox podman ansible
+
+# openSUSE
+sudo zypper install -y distrobox podman ansible
+
+# Arch
+sudo pacman -S distrobox podman ansible
+
+# Debian/Ubuntu (falls native Umgebung nicht gewünscht)
+sudo apt install -y distrobox podman ansible
+```
+
+### Ausführung
+
+```bash
+# 1. Repo klonen
+git clone https://github.com/pro-data-alb/pve-ansible-setup.git
+cd pve-ansible-setup
+
+# 2. Distrobox + Proxmox-Umgebung vollautomatisch einrichten
+ansible-playbook 00_setup_distrobox.yml
+
+# 3. In die Box wechseln
+distrobox enter iso-builder
+
+# 4. ISO bauen (ab hier alles im Container)
+ansible-playbook 01_build_iso.yml
+```
+
+> **Hinweis:** Distrobox mounted `$HOME` des Hosts automatisch.
+> Die fertige ISO unter `pve_iso_output_dir` (Default: `/tmp/pve-iso-build/`)
+> ist ohne weiteres Volume-Mapping direkt auf dem Host sichtbar.
+
+### Annahmen des Playbooks
+
+- Das Repo liegt im `$HOME` des ausführenden Users
+- Der User hat im Distrobox-Container passwordless `sudo` (Distrobox-Default)
+- Internet-Zugang für `download.proxmox.com` und `enterprise.proxmox.com` ist vorhanden
+- `ansible_connection: local` ist nach dem Setup in `inventory/hosts.yml` gesetzt
+
+### Troubleshooting Distrobox
+
+| Fehlermeldung | Ursache | Lösung |
+|---|---|---|
+| `distrobox: command not found` | distrobox nicht installiert | `dnf/apt/zypper install distrobox` |
+| `No container runtime found` | podman/docker fehlt | `dnf install podman` |
+| `Error: image not found: debian:trixie` | Image noch nicht lokal | distrobox pulled automatisch; Netz prüfen |
+| `sudo: command not found` | Container noch nicht initialisiert | `distrobox enter iso-builder -- true` einmal ausführen |
+| `proxmox-auto-install-assistant: not found` | Proxmox-Repo nicht eingerichtet | `00_setup_distrobox.yml` erneut ausführen |
+
+---
+
+## Quick-Reference – Distrobox auf beliebiger Distribution
+
+```bash
+# Voraussetzungen (einmalig, je nach Distribution)
+sudo dnf install -y distrobox podman ansible        # Fedora
+# sudo zypper install -y distrobox podman ansible   # openSUSE
+# sudo pacman -S distrobox podman ansible           # Arch
+
+# Repo klonen
+git clone https://github.com/pro-data-alb/pve-ansible-setup.git
+cd pve-ansible-setup
+
+# Distrobox + Proxmox-Umgebung einrichten (einmalig)
+ansible-playbook 00_setup_distrobox.yml
+
+# In die Box wechseln
+distrobox enter iso-builder
+
+# Root-Passwort-Hash erzeugen
+mkpasswd --method=yescrypt
+# → group_vars/all.yml: pve_root_password_hashed: "$y$j9T$..."
+
+# SSH Public Key eintragen
+cat ~/.ssh/id_ed25519.pub
+# → group_vars/all.yml: pve_root_ssh_keys: ["ssh-ed25519 AAAA..."]
+
+# host_vars für jeden Node anlegen
+cp host_vars/pve-alpha-01.yml host_vars/<mein-node>.yml
+# → IPs und MAC-Adressen eintragen
+
+# ISO bauen
+ansible-playbook 01_build_iso.yml
+```
