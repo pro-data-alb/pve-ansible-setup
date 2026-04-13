@@ -32,40 +32,35 @@ pve_ntp_servers:
   - "1.de.pool.ntp.org"
   - "2.de.pool.ntp.org"
 
+# -- DNS -----------------------------------------------------------------------
+# Primärer Nameserver = interner Resolver (z.B. Pi-hole / AdGuard Home).
+# dns2 greift, wenn der interne Resolver nicht erreichbar ist.
+# Überschreibe dns1 in host_vars/<node>.yml falls Nodes unterschiedliche
+# Resolver nutzen sollen.
+pve_dns_domain: "lan.example.com"
+pve_dns_servers:
+  - "192.168.1.1"   # dns1 – interner Resolver (Pi-hole / AdGuard)
+  - "1.1.1.1"       # dns2 – Fallback Cloudflare
+  # - "8.8.8.8"     # dns3 – optional, Google als zweiter Fallback
+
 # -- SSH -----------------------------------------------------------------------
 pve_ssh_permit_root_login: "prohibit-password"
 pve_ssh_password_auth:     "no"
 
 # =============================================================================
 # NIC-Alias / MAC-Resolution
-#
-# pve_nic_aliases wird in host_vars/<node>.yml pro Node definiert.
-# Dort werden die MAC-Adressen der NICs eingetragen (aus IPMI/LLDP).
-# mac_resolve.yml löst MACs → Kernel-Interfacenamen auf.
-#
-# pve_nic_udev_rules: true
-#   → Schreibt persistente udev-Regeln nach /etc/udev/rules.d/
-#   → Stabile Interfacenamen nach Reboots
-#   → Datei: /etc/udev/rules.d/70-pve-nic-aliases.rules
 # =============================================================================
 pve_nic_udev_rules: true
 
 # =============================================================================
 # Netzwerk – Bond/Bridge Defaults
-#
-# KRITISCH: bond_lacp_rate MUSS "fast" sein wenn Bonds für Corosync genutzt
-# werden – sonst 90s Failover → HA-Fencing vor Link-Erkennung!
-# Slow (default) = LACPDU alle 30s → Failover 90s → Fencing nach ~60s
-# Fast           = LACPDU jede  1s → Failover  3s → kein ungewolltes Fencing
-# Quelle: https://pve.proxmox.com/wiki/Cluster_Manager#pvecm_corosync_over_bonds
-# WICHTIG: Auch am Switch LACP fast rate aktivieren!
 # =============================================================================
 
 # -- bond0 – Management + Corosync --------------------------------------------
 pve_bond0_name:             "bond0"
 pve_bond0_mode:             "802.3ad"
 pve_bond0_xmit_hash_policy: "layer3+4"
-pve_bond0_lacp_rate:        "fast"   # PFLICHT für Corosync-Bonds!
+pve_bond0_lacp_rate:        "fast"
 pve_bond0_miimon:           100
 
 # -- bond1 – Storage (NFS / iSCSI) --------------------------------------------
@@ -74,7 +69,7 @@ pve_bond1_mode:             "802.3ad"
 pve_bond1_xmit_hash_policy: "layer3+4"
 pve_bond1_lacp_rate:        "fast"
 pve_bond1_miimon:           100
-pve_bond1_enabled:          false    # Override in host_vars auf true
+pve_bond1_enabled:          false
 
 # -- bond2 – VM-Traffic / SDN VLAN-aware --------------------------------------
 pve_bond2_name:             "bond2"
@@ -82,7 +77,7 @@ pve_bond2_mode:             "802.3ad"
 pve_bond2_xmit_hash_policy: "layer3+4"
 pve_bond2_lacp_rate:        "fast"
 pve_bond2_miimon:           100
-pve_bond2_enabled:          false    # Override in host_vars auf true
+pve_bond2_enabled:          false
 
 # -- Management-Bridge vmbr0 --------------------------------------------------
 pve_mgmt_bridge:      "vmbr0"
@@ -100,7 +95,7 @@ pve_sdn_enabled:   true
 pve_sdn_zone_id:   "vxlan01"
 pve_sdn_zone_type: "vxlan"
 
-pve_sdn_vxlan_peers: []   # Wird im Playbook aus ansible_play_hosts befüllt
+pve_sdn_vxlan_peers: []
 
 pve_sdn_vnets:
   - id:    "vnet100"

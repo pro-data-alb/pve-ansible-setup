@@ -1,4 +1,27 @@
 ---
+- name: API-Ticket holen (gemeinsam für alle Netz-/DNS-Tasks)
+  ansible.builtin.uri:
+    url:            "https://{{ pve_api_host }}:{{ pve_api_port }}/api2/json/access/ticket"
+    method:         POST
+    validate_certs: "{{ pve_api_validate_certs }}"
+    body_format:    form-urlencoded
+    body:
+      username: "{{ pve_api_user }}"
+      password: "{{ pve_api_password }}"
+    status_code: 200
+  register: _pve_ticket
+  no_log: true
+
+- name: API-Credentials als Facts setzen
+  ansible.builtin.set_fact:
+    _pve_auth: "{{ _pve_ticket.json.data.ticket }}"
+    _pve_csrf: "{{ _pve_ticket.json.data.CSRFPreventionToken }}"
+  no_log: true
+
+- name: DNS konfigurieren (primärer + Fallback-Nameserver)
+  ansible.builtin.import_tasks: dns.yml
+  when: pve_configure_dns | bool
+
 - name: APT-Repositories konfigurieren
   ansible.builtin.import_tasks: repos.yml
   when: pve_configure_repos | bool

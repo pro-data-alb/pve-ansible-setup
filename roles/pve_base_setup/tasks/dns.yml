@@ -1,0 +1,60 @@
+---
+# =============================================================================
+# DNS-Konfiguration via Proxmox REST API
+#
+# Setzt /etc/resolv.conf (domain, search, nameserver) über pvesh /nodes/<node>/dns
+# Idempotent: Nur bei Abweichung wird ein PUT abgesetzt.
+#
+# Variablen (group_vars oder host_vars):
+#   pve_dns_domain   – lokale Suchdomain  (z.B. "lan.example.com")
+#   pve_dns_servers  – Liste mit 1–3 Nameserver-IPs:
+#                        - "192.168.1.1"   # dns1 (Pflicht)
+#                        - "8.8.8.8"       # dns2 (Fallback)
+#                        - "8.8.4.4"       # dns3 (optional)
+# =============================================================================
+
+- name: "dns | Aktuellen DNS-Stand abfragen"
+  ansible.builtin.uri:
+    url:            "https://{{ pve_api_host }}:{{ pve_api_port }}/api2/json/nodes/{{ inventory_hostname }}/dns"
+    method:         GET
+    validate_certs: "{{ pve_api_validate_certs }}"
+    headers:
+      Cookie: "PVEAuthCookie={{ _pve_auth }}"
+    status_code: 200
+  register: _pve_dns_current
+
+- name: "dns | Gewünschten Zielzustand berechnen"
+  ansible.builtin.set_fact:
+    _dns_desired:
+      search: "{{ pve_dns_domain }}"
+      dns1:   "{{ pve_dns_servers[0] }}"
+      dns2:   "{{ pve_dns_servers[1] | default('') }}"
+      dns3:   "{{ pve_dns_servers[2] | default('') }}"
+
+- name: "dns | DNS-Konfiguration setzen (PUT nur bei Abweichung)"
+  ansible.builtin.uri:
+    url:            "https://{{ pve_api_host }}:{{ pve_api_port }}/api2/json/nodes/{{ inventory_hostname }}/dns"
+    method:         PUT
+    validate_certs: "{{ pve_api_validate_certs }}"
+    headers:
+      Cookie:              "PVEAuthCookie={{ _pve_auth }}"
+      CSRFPreventionToken: "{{ _pve_csrf }}"
+    body_format: json
+    body: "{{ _dns_desired }}"
+    status_code: 200
+  when: >
+    _pve_dns_current.json.data.search | default('') != _dns_desired.search or
+    _pve_dns_current.json.data.dns1   | default('') != _dns_desired.dns1   or
+    _pve_dns_current.json.data.dns2   | default('') != _dns_desired.dns2   or
+    _pve_dns_current.json.data.dns3   | default('') != _dns_desired.dns3
+  register: _dns_result
+  changed_when: _dns_result.status == 200
+
+- name: "dns | Zusammenfassung"
+  ansible.builtin.debug:
+    msg:
+      - "DNS {{ inventory_hostname }}:  search={{ _dns_desired.search }}"
+      - "  dns1={{ _dns_desired.dns1 }}"
+      - "  dns2={{ _dns_desired.dns2 | default('(nicht gesetzt)') }}"
+      - "  dns3={{ _dns_desired.dns3 | default('(nicht gesetzt)') }}"
+      - "  geändert={{ _dns_result.changed | default(false) }}"

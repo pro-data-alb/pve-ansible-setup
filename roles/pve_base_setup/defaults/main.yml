@@ -5,3 +5,17 @@ pve_configure_network: true
 pve_configure_sdn:     true
 pve_api_host:          "{{ ansible_host }}"
 pve_sdn_primary_node:  "{{ ansible_play_hosts | first }}"
+
+# -- DNS -----------------------------------------------------------------------
+# Zweiten (und optionalen dritten) Nameserver als Fallback setzen.
+# Setze pve_configure_dns: false um diesen Task zu überspringen.
+pve_configure_dns: true
+
+pve_dns_domain: "local"
+
+# Reihenfolge: dns1 = primär (z.B. interner Resolver),
+#              dns2 = Fallback (z.B. 8.8.8.8 oder 1.1.1.1)
+#              dns3 = optional
+pve_dns_servers:
+  - "8.8.8.8"    # Fallback – in group_vars/proxmox_nodes.yml überschreiben!
+  - "8.8.4.4"
