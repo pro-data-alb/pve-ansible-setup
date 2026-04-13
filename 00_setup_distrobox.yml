@@ -38,6 +38,7 @@
       - ansible
       - git
       - whois
+      - locales
 
   # ---------------------------------------------------------------------------
   pre_tasks:
@@ -72,13 +73,12 @@
       changed_when: false
 
     # -- 3. apt update ---------------------------------------------------------
-    # FIX Step 1: Tippfehler "changed_wen" → "changed_when" (war Parser-Fehler)
     - name: "distrobox | apt-get update"
       ansible.builtin.command:
         cmd: distrobox enter {{ distrobox_name }} -- sudo apt-get update -qq
       changed_when: false
 
-    # -- 4. Basispakete installieren ------------------------------------------
+    # -- 4. Basispakete installieren (inkl. locales) --------------------------
     - name: "distrobox | Basispakete installieren"
       ansible.builtin.command:
         cmd: >-
@@ -158,16 +158,23 @@
       register: _aia_ver
       changed_when: false
 
-    # -- 8. inventory/hosts.yml: ansible_python_interpreter wird direkt im
-    #       Inventory gesetzt (inventory/hosts.yml) – kein lineinfile nötig.
-    #       FIX Step 2: lineinfile-Tasks entfernt (waren nicht idempotent und
-    #       konnten bei mehrfacher Ausführung doppelte Zeilen erzeugen).
+    # -- 8b. en_US.UTF-8 Locale generieren ------------------------------------
+    # FIX #5: Debian-Trixie-Container haben standardmäßig keine UTF-8-Locale.
+    # Ansible >= 2.14 bricht ohne UTF-8 sofort ab (rc=1):
+    #   ERROR: Ansible requires the locale encoding to be UTF-8; Detected None.
+    # locales-Paket ist bereits in distrobox_apt_packages (Task 4) enthalten.
+    - name: "distrobox | en_US.UTF-8 locale generieren"
+      ansible.builtin.command:
+        cmd: distrobox enter {{ distrobox_name }} -- sudo locale-gen en_US.UTF-8
+      register: _locale_gen
+      changed_when: "'already' not in (_locale_gen.stdout | default(''))"
 
     # -- 9. ansible-galaxy collections im Container installieren --------------
     - name: "distrobox | ansible-galaxy collection install"
       ansible.builtin.command:
         cmd: >-
           distrobox enter {{ distrobox_name }} --
+          env LC_ALL=en_US.UTF-8
           ansible-galaxy collection install -r {{ playbook_dir }}/requirements.yml
       register: _galaxy
       changed_when: >-
