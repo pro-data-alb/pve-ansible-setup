@@ -8,28 +8,30 @@
 #   die MAC-Adressen (z. B. aus IPMI / Switch-LLDP-Tabellen).
 #
 #   Dieser Task-File:
-#     1. Liest alle physischen NIC-Names des Nodes via ansible_facts
+#     1. Liest alle physischen NIC-Names des Nodes via /sys/class/net
 #     2. Matched jede MAC aus pve_nic_aliases gegen die Facts
 #     3. Setzt _pve_resolved_nics[alias] = ifname als Host-Fact
 #     4. Baut _resolved_bond0/1/2_slaves aus den Aliases zusammen
 #     5. Schreibt persistente udev-Regeln damit der Alias-Name nach
 #        Reboots stabil bleibt (optional, steuerbar via pve_nic_udev_rules)
 #
+# T-04 Fix: Den ersten (invaliden) _mac_to_ifname-Task entfernt.
+#   Der Task nutzte 'vars: item: ""' mit 'ansible_' ~ item was leere/falsche
+#   Ergebnisse lieferte. Der robuste /sys/class/net-Block unten ist der
+#   korrekte und einzige Pfad.
+#
 # Variablen (in host_vars/<node>.yml definieren):
 #
-#   pve_nic_aliases:            # Liste aller NICs des Nodes
+#   pve_nic_aliases:
 #     - mac:   "aa:bb:cc:dd:ee:01"
-#       alias: "pve-mgmt-a"     # frei wählbarer Alias (nur für Doku/udev)
-#       role:  "bond0"          # bond0 | bond1 | bond2
+#       alias: "pve-mgmt-a"
+#       role:  "bond0"
 #     - mac:   "aa:bb:cc:dd:ee:02"
 #       alias: "pve-mgmt-b"
 #       role:  "bond0"
-#     - mac:   "aa:bb:cc:dd:ee:03"
-#       alias: "pve-stor-a"
-#       role:  "bond1"
 #     ...
 #
-#   pve_nic_udev_rules: true    # udev-Regeln schreiben (default: true)
+#   pve_nic_udev_rules: true
 # =============================================================================
 
 - name: "mac_resolve | Facts neu laden (NIC-Infos sicherstellen)"
@@ -39,24 +41,7 @@
       - "network"
   when: ansible_interfaces is not defined
 
-- name: "mac_resolve | MAC→Ifname Mapping aus ansible_facts aufbauen"
-  ansible.builtin.set_fact:
-    _mac_to_ifname: >-
-      {{
-        dict(
-          ansible_interfaces
-          | map('extract', vars, ['ansible_' ~ item])
-          | map(attribute='macaddress', default='')
-          | zip(ansible_interfaces)
-          | selectattr(0, 'ne', '')
-          | list
-        )
-      }}
-  vars:
-    item: ""
-  # Alternativer Weg: /sys/class/net direkt lesen (robuster bei VMs/Bonds)
-
-# Robusterer Ansatz: direkt /sys/class/net/<iface>/address lesen
+# Robuster Ansatz: direkt /sys/class/net/<iface>/address lesen
 - name: "mac_resolve | Alle physischen Interfaces und MACs einlesen"
   ansible.builtin.find:
     paths: /sys/class/net

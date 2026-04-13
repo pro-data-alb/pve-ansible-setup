@@ -1,4 +1,3 @@
----
 # =============================================================================
 # Netzwerk-Konfiguration via Proxmox REST API
 #
@@ -18,6 +17,10 @@
 #   Slow (default) = LACPDU alle 30s → Failover 90s → HA-Fencing nach ~60s!
 #   Fast           = LACPDU jede  1s → Failover  3s → kein ungewolltes Fencing
 #   Quelle: https://pve.proxmox.com/wiki/Cluster_Manager#pvecm_corosync_over_bonds
+#
+# T-05 Fix: Loop-Register .changed → korrektes selectattr auf .results
+#   Bei loop-Tasks enthält das Register eine Liste in .results[*].changed.
+#   Ein direktes _register.changed ist bei Loops immer false.
 # =============================================================================
 
 # -- Phase 1: MAC → Interfacename auflösen ------------------------------------
@@ -255,6 +258,8 @@
   register: _vmbrdata
 
 # -- Commit -------------------------------------------------------------------
+# T-05 Fix: Loop-Register via .results | selectattr('changed') prüfen.
+# Ein direktes _register.changed ist bei loop-Tasks immer false.
 - name: "net | Netzwerkkonfiguration committen (pvenetcommit)"
   ansible.builtin.uri:
     url:            "https://{{ pve_api_host }}:{{ pve_api_port }}/api2/json/nodes/{{ inventory_hostname }}/network"
@@ -265,13 +270,15 @@
       CSRFPreventionToken: "{{ _pve_csrf }}"
     status_code: 200
   when: >
-    (_bond0  is defined and _bond0.changed  | default(false)) or
-    (_vmbr0  is defined and _vmbr0.changed  | default(false)) or
-    (_bond1  is defined and _bond1.changed  | default(false)) or
-    (_storage_vlans   is defined and _storage_vlans.changed   | default(false)) or
-    (_storage_bridges is defined and _storage_bridges.changed | default(false)) or
-    (_bond2  is defined and _bond2.changed  | default(false)) or
-    (_vmbrdata is defined and _vmbrdata.changed | default(false))
+    (_bond0    is defined and _bond0.changed    | default(false)) or
+    (_vmbr0    is defined and _vmbr0.changed    | default(false)) or
+    (_bond1    is defined and _bond1.changed    | default(false)) or
+    (_bond2    is defined and _bond2.changed    | default(false)) or
+    (_vmbrdata is defined and _vmbrdata.changed | default(false)) or
+    (_storage_vlans   is defined and
+     _storage_vlans.results   | default([]) | selectattr('changed', 'equalto', true) | list | length > 0) or
+    (_storage_bridges is defined and
+     _storage_bridges.results | default([]) | selectattr('changed', 'equalto', true) | list | length > 0)
   register: _net_commit
 
 - name: "net | Zusammenfassung"

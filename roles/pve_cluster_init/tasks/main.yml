@@ -4,16 +4,15 @@
 #
 # Ablauf:
 #   1. Primary Node: pvecm create <name> (falls Cluster noch nicht existiert)
-#   2. Primary propagiert seine IP an alle anderen Play-Hosts
+#   2. Primary propagiert seine IP UND seinen Inventory-Hostnamen an alle Nodes
 #   3. Secondary Nodes:
 #      a) Root-SSH-Key des Ansible-Controllers auf Primary deployen
 #      b) Primary-Root-Key auf Secondary deployen (pvecm braucht root-zu-root SSH)
 #      c) pvecm add <primary_ip> --link0 <eigene_ip>
 #
-# T-09 Fix: ansible.builtin.expect entfernt.
-#   Grund: pvecm add --use_ssh ist interaktiv und fragt nach root-Passwort.
-#   Besser: root SSH-Keys vor dem Join beidseitig deployen.
-#   pvecm add funktioniert dann ohne Passwort-Prompt und ohne expect.
+# T-03 Fix: delegate_to nutzt jetzt _pve_cluster_primary_host (Inventory-Name)
+#   statt der IP-Adresse. Nur über den Inventory-Namen kann Ansible die
+#   korrekten Verbindungsparameter (SSH-User, Port, Become etc.) auflösen.
 # =============================================================================
 
 - name: "cluster | Aktuellen Cluster-Status pruefen"
@@ -57,34 +56,29 @@
       changed_when: false
 
 # =============================================================================
-# Primary IP an alle Nodes weitergeben
+# Primary IP + Hostname an alle Nodes weitergeben
+# T-03: Hostname wird zusätzlich zur IP propagiert, damit delegate_to
+#       den Inventory-Eintrag (inkl. SSH-Variablen) korrekt auflöst.
 # =============================================================================
-- name: "cluster | Primary-IP als delegierter Fact propagieren"
+- name: "cluster | Primary-IP und Hostname als delegierte Facts propagieren"
   ansible.builtin.set_fact:
-    pve_cluster_primary_ip: "{{ pve_node_ip }}"
+    pve_cluster_primary_ip:   "{{ pve_node_ip }}"
+    _pve_cluster_primary_host: "{{ inventory_hostname }}"
   delegate_to:    "{{ item }}"
   delegate_facts: true
   loop:           "{{ ansible_play_hosts }}"
   when: pve_cluster_primary | default(false) | bool
 
 # =============================================================================
-# SSH-Key-Vorbereitung fuer pvecm add (ersetzt expect-basierter Ansatz)
-#
-# pvecm add kommuniziert intern via SSH als root zwischen den Nodes.
-# Damit kein Passwort-Prompt erscheint, muessen die SSH-Keys vorab
-# beidseitig deployed werden:
-#   - Ansible-Controller-Key -> Primary root authorized_keys
-#   - Primary root public-key -> Secondary root authorized_keys
-#   - Secondary root public-key -> Primary root authorized_keys
-#
-# Voraussetzung: pve_root_ssh_keys enthaelt den Ansible-Controller-Key
+# SSH-Key-Vorbereitung fuer pvecm add
+# T-03: Alle delegate_to nutzen _pve_cluster_primary_host statt der IP.
 # =============================================================================
 - name: "cluster | [SECONDARY] SSH-Schluessel-Austausch vorbereiten"
   when:
     - not (pve_cluster_primary | default(false) | bool)
     - not (_node_in_cluster | bool)
-    - pve_cluster_primary_ip is defined
-    - pve_cluster_primary_ip | length > 0
+    - _pve_cluster_primary_host is defined
+    - _pve_cluster_primary_host | length > 0
   block:
 
     - name: "cluster | Root-SSH-Keypair auf Secondary erzeugen (falls nicht vorhanden)"
@@ -101,20 +95,20 @@
       ansible.builtin.command:
         cmd: ssh-keygen -t ed25519 -N '' -f /root/.ssh/id_ed25519
         creates: /root/.ssh/id_ed25519
-      delegate_to: "{{ pve_cluster_primary_ip }}"
+      delegate_to: "{{ _pve_cluster_primary_host }}"
 
     - name: "cluster | Public-Key des Primary einlesen"
       ansible.builtin.slurp:
         src: /root/.ssh/id_ed25519.pub
       register: _primary_pubkey
-      delegate_to: "{{ pve_cluster_primary_ip }}"
+      delegate_to: "{{ _pve_cluster_primary_host }}"
 
     - name: "cluster | Secondary-Key auf Primary authorisieren"
       ansible.posix.authorized_key:
         user:  root
         state: present
         key:   "{{ _secondary_pubkey.content | b64decode | trim }}"
-      delegate_to: "{{ pve_cluster_primary_ip }}"
+      delegate_to: "{{ _pve_cluster_primary_host }}"
 
     - name: "cluster | Primary-Key auf Secondary authorisieren"
       ansible.posix.authorized_key:
@@ -135,8 +129,8 @@
   when:
     - not (pve_cluster_primary | default(false) | bool)
     - not (_node_in_cluster | bool)
-    - pve_cluster_primary_ip is defined
-    - pve_cluster_primary_ip | length > 0
+    - _pve_cluster_primary_host is defined
+    - _pve_cluster_primary_host | length > 0
   block:
     - name: "cluster | pvecm add {{ pve_cluster_primary_ip }}"
       ansible.builtin.command:
@@ -157,13 +151,7 @@
       retries: 30
       delay:   5
       changed_when: false
-      delegate_to: >-
-        {{ ansible_play_hosts
-           | map('extract', hostvars)
-           | selectattr('pve_cluster_primary', 'defined')
-           | selectattr('pve_cluster_primary', 'equalto', true)
-           | map(attribute='inventory_hostname')
-           | first }}
+      delegate_to: "{{ _pve_cluster_primary_host }}"
 
 # =============================================================================
 # Finaler Status

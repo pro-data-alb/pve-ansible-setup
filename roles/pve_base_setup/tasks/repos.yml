@@ -1,18 +1,24 @@
 ---
+# T-06 Fix: failed_when: false für pve-enterprise.list ergänzt.
+# Auf einem Freshinstall ohne Subscription existiert die Datei nicht →
+# ansible.builtin.replace würde sonst mit 'file not found' abbrechen.
+# Analog zu ceph.list, das bereits ignore_errors: true hatte.
+
 - name: "repos | Enterprise-Repo deaktivieren"
   ansible.builtin.replace:
     path:    /etc/apt/sources.list.d/pve-enterprise.list
     regexp:  '^(deb .+)'
     replace: '# \1'
-  when: not pve_use_subscription
+  when:        not pve_use_subscription
+  failed_when: false
 
 - name: "repos | Ceph Enterprise-Repo deaktivieren"
   ansible.builtin.replace:
     path:    /etc/apt/sources.list.d/ceph.list
     regexp:  '^(deb .+)'
     replace: '# \1'
-  when: not pve_use_subscription
-  ignore_errors: true
+  when:        not pve_use_subscription
+  failed_when: false
 
 - name: "repos | No-Subscription-Repo für PVE 9 (Trixie) konfigurieren"
   ansible.builtin.copy:
