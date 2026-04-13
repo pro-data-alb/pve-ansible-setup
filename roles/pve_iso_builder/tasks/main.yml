@@ -56,12 +56,22 @@
   changed_when: false
   when: pve_iso_validate_answer | bool
 
+# FIX Step 4: Output-ISO-Status prüfen (nötig für Rebuild-Logik)
+- name: "iso | Output-ISO: Status prüfen"
+  ansible.builtin.stat:
+    path: "{{ pve_iso_output_dir }}/{{ pve_iso_output_filename }}"
+  register: _iso_out_stat
+
+# FIX Step 4: Output-ISO entfernen wenn Inputs geändert haben
+# Vorher: "creates:" verhinderte Neubau auch nach Template-Änderung!
 - name: "iso | Output-ISO entfernen wenn Inputs geändert"
   ansible.builtin.file:
     path:  "{{ pve_iso_output_dir }}/{{ pve_iso_output_filename }}"
     state: absent
   when: _answer_changed.changed or _firstboot_changed.changed
 
+# FIX Step 4: "creates:" entfernt – Rebuild wird durch when-Bedingung gesteuert.
+# ISO wird neu gebaut wenn: noch nicht vorhanden ODER answer.toml/firstboot.sh geändert.
 - name: "iso | Unattended ISO erzeugen"
   ansible.builtin.command:
     cmd: >-
@@ -71,4 +81,5 @@
       --answer-file {{ pve_iso_output_dir }}/answer.toml
       --on-first-boot {{ pve_iso_output_dir }}/firstboot.sh
       --output {{ pve_iso_output_dir }}/{{ pve_iso_output_filename }}
-    creates: "{{ pve_iso_output_dir }}/{{ pve_iso_output_filename }}"
+  when: not _iso_out_stat.stat.exists or _answer_changed.changed or _firstboot_changed.changed
+  changed_when: true
