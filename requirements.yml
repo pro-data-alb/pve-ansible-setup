@@ -1,6 +1,13 @@
 ---
 collections:
-  - name: community.general
-    version: ">=9.0.0"
+  # Proxmox Community Collection
+  # https://github.com/ansible-collections/community.proxmox
   - name: community.proxmox
     version: ">=1.0.0"
+
+  # ansible.posix: authorized_key, sysctl, etc.
+  - name: ansible.posix
+    version: ">=1.5.0"
+
+  # ansible.builtin ist in jeder Ansible-Installation enthalten
+  # (kein separater Install noetig)

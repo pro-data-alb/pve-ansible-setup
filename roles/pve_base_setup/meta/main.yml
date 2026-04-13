@@ -1,0 +1,26 @@
+---
+galaxy_info:
+  role_name:        pve_base_setup
+  author:           pro-data-alb
+  description:      >-
+    Proxmox VE 9 Node Base Setup: APT-Repos, Pakete, lldpd,
+    MAC-basierte Netzwerkkonfiguration (bond0/1/2 via LACP fast,
+    Storage-Bridges, vmbrData), udev-Regeln, SDN (VXLAN).
+  license:          MIT
+  min_ansible_version: "2.15"
+  platforms:
+    - name: Debian
+      versions:
+        - trixie
+  galaxy_tags:
+    - proxmox
+    - pve
+    - network
+    - bonding
+    - sdn
+    - infrastructure
+
+dependencies:
+  - role: ansible.posix
+    # benoetigt fuer ansible.posix.authorized_key in mac_resolve.yml
+    # Installation: ansible-galaxy collection install ansible.posix

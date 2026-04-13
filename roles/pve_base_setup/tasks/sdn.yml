@@ -1,8 +1,21 @@
 ---
-# SDN-Tasks nur auf dem primären Node – PVE repliziert im Cluster automatisch
-- name: SDN nur auf primärem Node konfigurieren
-  when: inventory_hostname == pve_sdn_primary_node
+# =============================================================================
+# SDN-Konfiguration via Proxmox REST API
+#
+# Wird nur auf dem primaeren Node ausgefuehrt (PVE repliziert automatisch).
+#
+# T-10 Fix: Echte Idempotenz fuer Subnets
+#   Vorher: status_code [200, 201, 500] - 500er verdeckten echte Fehler
+#   Jetzt:  GET /subnets pro VNet vor POST, nur anlegen wenn nicht vorhanden
+#
+# Reihenfolge: Zone -> VNets -> Subnets -> Apply
+# =============================================================================
+
+- name: SDN nur auf primaeren Node konfigurieren
+  when: pve_cluster_primary | default(false) | bool
   block:
+
+    # -- Auth -----------------------------------------------------------------
     - name: "sdn | API-Ticket holen"
       ansible.builtin.uri:
         url:            "https://{{ pve_api_host }}:{{ pve_api_port }}/api2/json/access/ticket"
@@ -22,6 +35,7 @@
         _sdn_csrf:   "{{ _sdn_ticket_raw.json.data.CSRFPreventionToken }}"
       no_log: true
 
+    # -- Zone -----------------------------------------------------------------
     - name: "sdn | Bestehende Zonen abfragen"
       ansible.builtin.uri:
         url:            "https://{{ pve_api_host }}:{{ pve_api_port }}/api2/json/cluster/sdn/zones"
@@ -47,11 +61,12 @@
           peers: "{{ pve_sdn_vxlan_peers | join(',') }}"
           mtu:   1450
         status_code: [200, 201]
-      when: >
+      when: >-
         pve_sdn_zone_id not in
         (_sdn_zones_existing.json.data | map(attribute='zone') | list)
       register: _sdn_zone_result
 
+    # -- VNets ----------------------------------------------------------------
     - name: "sdn | Bestehende VNets abfragen"
       ansible.builtin.uri:
         url:            "https://{{ pve_api_host }}:{{ pve_api_port }}/api2/json/cluster/sdn/vnets"
@@ -80,12 +95,42 @@
       loop: "{{ pve_sdn_vnets }}"
       loop_control:
         label: "{{ item.id }}"
-      when: >
+      when: >-
         item.id not in
         (_sdn_vnets_existing.json.data | map(attribute='vnet') | list)
       register: _vnet_results
 
-    - name: "sdn | Subnets anlegen (IPAM)"
+    # -- Subnets (T-10 Fix: echte Idempotenz) ---------------------------------
+    - name: "sdn | Bestehende Subnets pro VNet abfragen"
+      ansible.builtin.uri:
+        url:            "https://{{ pve_api_host }}:{{ pve_api_port }}/api2/json/cluster/sdn/vnets/{{ item.vnet }}/subnets"
+        method:         GET
+        validate_certs: "{{ pve_api_validate_certs }}"
+        headers:
+          Cookie: "PVEAuthCookie={{ _sdn_ticket }}"
+        status_code: [200, 404]    # 404 = VNet existiert noch nicht im Apply
+      loop: "{{ pve_sdn_subnets | default([]) }}"
+      loop_control:
+        label: "{{ item.vnet }}/{{ item.subnet }}"
+      register: _sdn_subnets_existing
+      when: pve_sdn_subnets is defined and pve_sdn_subnets | length > 0
+
+    - name: "sdn | Vorhandene Subnet-CIDRs als Fact zusammenfassen"
+      ansible.builtin.set_fact:
+        _existing_subnet_cidrs: >-
+          {{
+            _sdn_subnets_existing.results
+            | selectattr('status', 'defined')
+            | selectattr('status', 'equalto', 200)
+            | map(attribute='json')
+            | map(attribute='data', default=[])
+            | flatten
+            | map(attribute='cidr', default='')
+            | list
+          }}
+      when: _sdn_subnets_existing is defined
+
+    - name: "sdn | Subnets anlegen (nur fehlende)"
       ansible.builtin.uri:
         url:            "https://{{ pve_api_host }}:{{ pve_api_port }}/api2/json/cluster/sdn/vnets/{{ item.vnet }}/subnets"
         method:         POST
@@ -99,15 +144,18 @@
           subnet:  "{{ item.subnet }}"
           gateway: "{{ item.gateway }}"
           snat:    "{{ item.snat | int }}"
-        status_code: [200, 201, 500]
-      loop: "{{ pve_sdn_subnets }}"
+        status_code: [200, 201]    # kein 500 mehr!
+      loop: "{{ pve_sdn_subnets | default([]) }}"
       loop_control:
-        label: "{{ item.subnet }}"
+        label: "{{ item.vnet }}/{{ item.subnet }}"
       when:
         - pve_sdn_subnets is defined
         - pve_sdn_subnets | length > 0
+        - item.subnet not in (_existing_subnet_cidrs | default([]))
+      register: _subnet_results
 
-    - name: "sdn | Konfiguration auf alle Nodes anwenden"
+    # -- Apply ----------------------------------------------------------------
+    - name: "sdn | Konfiguration auf alle Nodes anwenden (pvesdnapply)"
       ansible.builtin.uri:
         url:            "https://{{ pve_api_host }}:{{ pve_api_port }}/api2/json/cluster/sdn"
         method:         PUT
@@ -116,14 +164,17 @@
           Cookie:              "PVEAuthCookie={{ _sdn_ticket }}"
           CSRFPreventionToken: "{{ _sdn_csrf }}"
         status_code: 200
-      when: >
-        (_sdn_zone_result is defined and _sdn_zone_result.changed | default(false)) or
-        (_vnet_results is defined and _vnet_results.changed | default(false))
+      when: >-
+        (_sdn_zone_result  is defined and _sdn_zone_result.changed  | default(false)) or
+        (_vnet_results     is defined and _vnet_results.changed     | default(false)) or
+        (_subnet_results   is defined and _subnet_results.changed   | default(false))
 
+    # -- Status ---------------------------------------------------------------
     - name: "sdn | Status ausgeben"
       ansible.builtin.debug:
         msg:
-          - "✅ SDN konfiguriert"
-          - "   Zone:  {{ pve_sdn_zone_id }} ({{ pve_sdn_zone_type }})"
-          - "   VNets: {{ pve_sdn_vnets | map(attribute='id') | list }}"
-          - "   Peers: {{ pve_sdn_vxlan_peers }}"
+          - "SDN konfiguriert auf {{ inventory_hostname }}"
+          - "  Zone:    {{ pve_sdn_zone_id }} ({{ pve_sdn_zone_type }})"
+          - "  VNets:   {{ pve_sdn_vnets | map(attribute='id') | list }}"
+          - "  Subnets: {{ pve_sdn_subnets | default([]) | map(attribute='subnet') | list }}"
+          - "  Peers:   {{ pve_sdn_vxlan_peers }}"
