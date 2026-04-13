@@ -1,6 +1,24 @@
-# ── Proxmox VE 9 Answer File ──────────────────────────────────────────────────
-# PVE 9+: ausschließlich kebab-case Keys!
+# =============================================================================
+# Proxmox VE 9 Answer File
+# PVE 9+: ausschliesslich kebab-case Keys!
 # Doku: https://pve.proxmox.com/wiki/Automated_Installation
+#
+# Netzwerk-Strategie (zweistufig):
+#   Stufe 1 - Installer (dieses File):
+#     source = "from-dhcp"
+#     Der Installer benoetigt ein lauffaehiges Interface fuer Repo-Zugriff.
+#     Er waehlt automatisch die erste erkannte NIC und bezieht per DHCP eine IP.
+#
+#   Stufe 2 - firstboot.sh (nach Installation, vor erstem Reboot):
+#     MAC-Adressen aus pve_nic_aliases[role=bond0] werden gegen
+#     /sys/class/net aufgeloest.
+#     bond0 (LACP fast) + vmbr0 (statische Mgmt-IP) werden aufgebaut.
+#     udev-Regeln fuer stabile Interfacenamen werden geschrieben.
+#     => Nach Reboot ist der Node per SSH auf pve_node_ip erreichbar.
+#
+#   Stufe 3 - Ansible (nach erstem Reboot):
+#     bond1 (Storage), bond2 (VM-Traffic), Cluster-Join, SDN, ...
+# =============================================================================
 
 [global]
 keyboard             = "{{ pve_keyboard }}"
@@ -23,13 +41,10 @@ root-ssh-keys = [
 source = "from-dhcp"
 domain = "{{ pve_domain }}"
 
+# Stufe 1: from-dhcp - firstboot.sh baut danach bond0/vmbr0 auf
+# Stufe 2 (bond0/vmbr0) wird durch firstboot.sh erledigt
 [network]
-source = "{{ pve_network_source }}"
-{% if pve_network_source == 'from-answer' %}
-cidr    = "{{ pve_node_ip }}/{{ pve_node_cidr_prefix }}"
-gateway = "{{ pve_node_gw }}"
-dns     = "{{ pve_node_dns }}"
-{% endif %}
+source = "from-dhcp"
 
 [disk-setup]
 filesystem = "{{ pve_disk_filesystem }}"
