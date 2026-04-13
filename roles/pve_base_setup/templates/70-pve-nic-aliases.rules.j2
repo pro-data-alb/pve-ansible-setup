@@ -1,0 +1,13 @@
+# =============================================================================
+# /etc/udev/rules.d/70-pve-nic-aliases.rules
+# Autogeneriert durch Ansible – pve_base_setup/mac_resolve.yml
+# NICHT manuell bearbeiten!
+#
+# Weist physischen NICs stabile Kernel-Namen basierend auf MAC-Adressen zu.
+# Wird beim nächsten Reboot aktiv (oder nach: udevadm trigger --action=add)
+# =============================================================================
+{% for alias, data in _resolved.items() %}
+
+# {{ alias }} – bond role: {{ data.role }}
+SUBSYSTEM=="net", ACTION=="add", ATTR{address}=="{{ data.mac }}", NAME="{{ data.ifname }}"
+{% endfor %}

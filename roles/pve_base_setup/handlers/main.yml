@@ -1,10 +1,17 @@
 ---
 - name: lldpd neu starten
   ansible.builtin.systemd:
-    name:  lldpd
-    state: restarted
+    name:    lldpd
+    state:   restarted
+    enabled: true
 
 - name: ssh neu starten
   ansible.builtin.systemd:
-    name:  ssh
-    state: restarted
+    name:    ssh
+    state:   restarted
+    enabled: true
+
+- name: udev reload
+  ansible.builtin.command:
+    cmd: udevadm control --reload-rules
+  changed_when: true

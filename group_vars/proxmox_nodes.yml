@@ -1,7 +1,7 @@
 ---
 # =============================================================================
 # group_vars/proxmox_nodes.yml – Gilt für alle PVE-Nodes
-# Node-spezifische Werte (IPs, Bond-Slaves) → host_vars/<hostname>.yml
+# Node-spezifische Werte (MACs, IPs) → host_vars/<hostname>.yml
 # =============================================================================
 
 # -- APT -----------------------------------------------------------------------
@@ -37,6 +37,20 @@ pve_ssh_permit_root_login: "prohibit-password"
 pve_ssh_password_auth:     "no"
 
 # =============================================================================
+# NIC-Alias / MAC-Resolution
+#
+# pve_nic_aliases wird in host_vars/<node>.yml pro Node definiert.
+# Dort werden die MAC-Adressen der NICs eingetragen (aus IPMI/LLDP).
+# mac_resolve.yml löst MACs → Kernel-Interfacenamen auf.
+#
+# pve_nic_udev_rules: true
+#   → Schreibt persistente udev-Regeln nach /etc/udev/rules.d/
+#   → Stabile Interfacenamen nach Reboots
+#   → Datei: /etc/udev/rules.d/70-pve-nic-aliases.rules
+# =============================================================================
+pve_nic_udev_rules: true
+
+# =============================================================================
 # Netzwerk – Bond/Bridge Defaults
 #
 # KRITISCH: bond_lacp_rate MUSS "fast" sein wenn Bonds für Corosync genutzt
@@ -48,7 +62,6 @@ pve_ssh_password_auth:     "no"
 # =============================================================================
 
 # -- bond0 – Management + Corosync --------------------------------------------
-# Slaves: pve_bond0_slaves in host_vars/<node>.yml
 pve_bond0_name:             "bond0"
 pve_bond0_mode:             "802.3ad"
 pve_bond0_xmit_hash_policy: "layer3+4"
@@ -56,8 +69,6 @@ pve_bond0_lacp_rate:        "fast"   # PFLICHT für Corosync-Bonds!
 pve_bond0_miimon:           100
 
 # -- bond1 – Storage (NFS / iSCSI) --------------------------------------------
-# Slaves:  pve_bond1_slaves  in host_vars/<node>.yml
-# Bridges: pve_storage_bridges in host_vars/<node>.yml
 pve_bond1_name:             "bond1"
 pve_bond1_mode:             "802.3ad"
 pve_bond1_xmit_hash_policy: "layer3+4"
@@ -66,7 +77,6 @@ pve_bond1_miimon:           100
 pve_bond1_enabled:          false    # Override in host_vars auf true
 
 # -- bond2 – VM-Traffic / SDN VLAN-aware --------------------------------------
-# Slaves: pve_bond2_slaves in host_vars/<node>.yml
 pve_bond2_name:             "bond2"
 pve_bond2_mode:             "802.3ad"
 pve_bond2_xmit_hash_policy: "layer3+4"
