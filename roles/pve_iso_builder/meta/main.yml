@@ -1,4 +1,7 @@
 ---
+# T-07 Fix: min_ansible_version 2.15 → 2.16
+# ansible.builtin.known_hosts (genutzt in pve_cluster_init) ist erst
+# ab Ansible 2.16 stabil verfügbar.
 galaxy_info:
   role_name:        pve_iso_builder
   author:           pro-data-alb
@@ -7,7 +10,7 @@ galaxy_info:
     proxmox-auto-install-assistant. Bettet answer.toml und firstboot.sh
     mit MAC-basiertem bond0/vmbr0 Setup ein.
   license:          MIT
-  min_ansible_version: "2.15"
+  min_ansible_version: "2.16"
   platforms:
     - name: Debian
       versions:

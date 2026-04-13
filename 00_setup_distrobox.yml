@@ -1,191 +1,65 @@
+---
 # =============================================================================
-# Playbook 00 – Distrobox iso-builder vorbereiten
-#
-# Distributions-agnostisch: läuft auf jedem Host mit distrobox + podman/docker.
-# Ausführen direkt auf dem Host (nicht im Container):
-#
-#   ansible-playbook 00_setup_distrobox.yml
-#
-# Voraussetzungen auf dem Host:
-#   - distrobox   (dnf / apt / zypper / pacman install distrobox)
-#   - podman oder docker
-#   - ansible >= 2.15 (für dieses Playbook selbst)
-#
-# Annahmen:
-#   - Das Repo liegt im $HOME des Users (Distrobox mounted $HOME automatisch)
-#   - Der User hat passwordless sudo im Container (Distrobox-Default)
-#   - Internet-Zugang für APT und PVE-Keyring ist vorhanden
+# 00_setup_distrobox.yml
+# Richtet Distrobox auf dem Ansible-Controller-Host ein
 # =============================================================================
-- name: Distrobox iso-builder einrichten
+- name: "Setup Distrobox"
   hosts: localhost
-  connection: local
-  gather_facts: false
+  become: true
+  gather_facts: true
 
-  vars:
-    distrobox_name: "iso-builder"
-    distrobox_image: "debian:trixie"
-    pve_keyring_url: >-
-      https://enterprise.proxmox.com/debian/proxmox-archive-keyring-trixie.gpg
-    pve_keyring_dest: "/usr/share/keyrings/proxmox-archive-keyring.gpg"
-    pve_sources_dest: "/etc/apt/sources.list.d/pve.sources"
-    # Staging-Pfad im geteilten Home (Distrobox sieht $HOME des Hosts)
-    pve_sources_staging: "{{ lookup('env', 'HOME') }}/.pve-sources.tmp"
-    distrobox_apt_packages:
-      - wget
-      - gpg
-      - ca-certificates
-      - python3
-      - ansible
-      - git
-      - whois
+  vars_files:
+    - group_vars/all.yml
 
-  # ---------------------------------------------------------------------------
-  pre_tasks:
-
-    - name: "pre | distrobox-Binary vorhanden?"
-      ansible.builtin.command:
-        cmd: which distrobox
-      changed_when: false
-
-    - name: "pre | Container-Runtime vorhanden (podman oder docker)?"
-      ansible.builtin.shell:
-        cmd: which podman || which docker
-      changed_when: false
-
-  # ---------------------------------------------------------------------------
   tasks:
 
-    # -- 1. Container anlegen --------------------------------------------------
-    - name: "distrobox | Container '{{ distrobox_name }}' anlegen (idempotent)"
+    # -- 1. Voraussetzungen prüfen --------------------------------------------
+    - name: "distrobox | podman oder docker prüfen"
       ansible.builtin.command:
-        cmd: distrobox create --name {{ distrobox_name }} --image {{ distrobox_image }} --yes
-      register: _create
-      changed_when: "'already exists' not in (_create.stderr | default(''))"
-      failed_when:
-        - _create.rc != 0
-        - "'already exists' not in (_create.stderr | default(''))"
-
-    # -- 2. Container initialisieren (erster Start) ---------------------------
-    - name: "distrobox | Container initialisieren (erster Start)"
-      ansible.builtin.command:
-        cmd: distrobox enter {{ distrobox_name }} -- true
-      changed_when: false
-
-    # -- 3. apt update ---------------------------------------------------------
-    # FIX Step 1: Tippfehler "changed_wen" → "changed_when" (war Parser-Fehler)
-    - name: "distrobox | apt-get update"
-      ansible.builtin.command:
-        cmd: distrobox enter {{ distrobox_name }} -- sudo apt-get update -qq
-      changed_when: false
-
-    # -- 4. Basispakete installieren ------------------------------------------
-    - name: "distrobox | Basispakete installieren"
-      ansible.builtin.command:
-        cmd: >-
-          distrobox enter {{ distrobox_name }} -- sudo apt-get install -y
-          {{ distrobox_apt_packages | join(' ') }}
-      register: _pkgs
-      changed_when: "'0 newly installed' not in (_pkgs.stdout | default(''))"
-
-    # -- 5. Proxmox GPG-Key ---------------------------------------------------
-    - name: "distrobox | Proxmox GPG-Key: Existenz prüfen"
-      ansible.builtin.command:
-        cmd: distrobox enter {{ distrobox_name }} -- test -f {{ pve_keyring_dest }}
-      register: _keyring_check
+        cmd: "{{ item }}"
+      loop:
+        - podman --version
+        - docker --version
+      register: _container_runtime
       changed_when: false
       failed_when: false
 
-    - name: "distrobox | Proxmox GPG-Key herunterladen"
+    - name: "distrobox | Mindestens eine Container-Runtime muss vorhanden sein"
+      ansible.builtin.fail:
+        msg: "Weder podman noch docker gefunden – bitte vorher installieren."
+      when:
+        - _container_runtime.results[0].rc != 0
+        - _container_runtime.results[1].rc != 0
+
+    # -- 2. Distrobox installieren -------------------------------------------
+    - name: "distrobox | Paket installieren"
+      ansible.builtin.apt:
+        name: distrobox
+        state: present
+
+    # -- 3. apt update --------------------------------------------------------
+    - name: "distrobox | apt-cache aktualisieren"
+      ansible.builtin.apt:
+        update_cache: true
+        cache_valid_time: 3600
+
+    # -- 4. Distrobox-Container erstellen ------------------------------------
+    - name: "distrobox | Container '{{ distrobox_container_name }}' erstellen"
       ansible.builtin.command:
         cmd: >-
-          distrobox enter {{ distrobox_name }} --
-          sudo wget -q {{ pve_keyring_url }} -O {{ pve_keyring_dest }}
-      when: _keyring_check.rc != 0
-      changed_when: true
+          distrobox create
+          --name {{ distrobox_container_name }}
+          --image {{ distrobox_image }}
+          --home {{ distrobox_home }}
+      args:
+        creates: "{{ ansible_env.HOME }}/.local/share/containers/storage/volumes/{{ distrobox_container_name }}"
+      register: _distrobox_create
+      changed_when: _distrobox_create.rc == 0
 
-    # -- 6. Proxmox-Repo via Staging-Datei im geteilten Home -----------------
-    - name: "distrobox | pve.sources: Existenz im Container prüfen"
+    # -- 5. Distrobox-Container starten --------------------------------------
+    - name: "distrobox | Container '{{ distrobox_container_name }}' starten"
       ansible.builtin.command:
-        cmd: distrobox enter {{ distrobox_name }} -- test -f {{ pve_sources_dest }}
-      register: _sources_check
+        cmd: "distrobox enter {{ distrobox_container_name }} -- true"
+      register: _distrobox_enter
       changed_when: false
-      failed_when: false
-
-    - name: "distrobox | pve.sources Staging-Datei im Host-Home schreiben"
-      ansible.builtin.copy:
-        dest: "{{ pve_sources_staging }}"
-        content: |
-          Types: deb
-          URIs: http://download.proxmox.com/debian/pve
-          Suites: trixie
-          Components: pve-no-subscription
-          Signed-By: {{ pve_keyring_dest }}
-        mode: "0644"
-      when: _sources_check.rc != 0
-
-    - name: "distrobox | pve.sources aus Staging in Container-Ziel kopieren"
-      ansible.builtin.command:
-        cmd: >-
-          distrobox enter {{ distrobox_name }} --
-          sudo cp {{ pve_sources_staging }} {{ pve_sources_dest }}
-      when: _sources_check.rc != 0
-      changed_when: true
-
-    - name: "distrobox | Staging-Datei aufräumen"
-      ansible.builtin.file:
-        path: "{{ pve_sources_staging }}"
-        state: absent
-      when: _sources_check.rc != 0
-
-    - name: "distrobox | apt-get update nach Proxmox-Repo"
-      ansible.builtin.command:
-        cmd: distrobox enter {{ distrobox_name }} -- sudo apt-get update -qq
-      changed_when: false
-      when: _sources_check.rc != 0
-
-    # -- 7. proxmox-auto-install-assistant ------------------------------------
-    - name: "distrobox | proxmox-auto-install-assistant installieren"
-      ansible.builtin.command:
-        cmd: >-
-          distrobox enter {{ distrobox_name }} --
-          sudo apt-get install -y proxmox-auto-install-assistant
-      register: _aia
-      changed_when: "'0 newly installed' not in (_aia.stdout | default(''))"
-
-    - name: "distrobox | Smoke-Test: proxmox-auto-install-assistant --version"
-      ansible.builtin.command:
-        cmd: distrobox enter {{ distrobox_name }} -- proxmox-auto-install-assistant --version
-      register: _aia_ver
-      changed_when: false
-
-    # -- 8. inventory/hosts.yml: ansible_python_interpreter wird direkt im
-    #       Inventory gesetzt (inventory/hosts.yml) – kein lineinfile nötig.
-    #       FIX Step 2: lineinfile-Tasks entfernt (waren nicht idempotent und
-    #       konnten bei mehrfacher Ausführung doppelte Zeilen erzeugen).
-
-    # -- 9. ansible-galaxy collections im Container installieren --------------
-    - name: "distrobox | ansible-galaxy collection install"
-      ansible.builtin.command:
-        cmd: >-
-          distrobox enter {{ distrobox_name }} --
-          ansible-galaxy collection install -r {{ playbook_dir }}/requirements.yml
-      register: _galaxy
-      changed_when: >-
-        'All collection(s) are already installed' not in (_galaxy.stdout | default(''))
-
-    # -- 10. Zusammenfassung --------------------------------------------------
-    - name: "Zusammenfassung"
-      ansible.builtin.debug:
-        msg:
-          - "╔══════════════════════════════════════════════════════════════╗"
-          - "║  ✅  Distrobox '{{ distrobox_name }}' ist eingerichtet"
-          - "║  {{ _aia_ver.stdout }}"
-          - "╠══════════════════════════════════════════════════════════════╣"
-          - "║  Nächste Schritte:"
-          - "║  1. group_vars/all.yml:"
-          - "║       pve_root_password_hashed → mkpasswd --method=yescrypt"
-          - "║       pve_root_ssh_keys        → cat ~/.ssh/id_ed25519.pub"
-          - "║  2. host_vars/<node>.yml anlegen (IP + MAC-Adressen)"
-          - "║  3. distrobox enter {{ distrobox_name }}"
-          - "║  4. ansible-playbook 01_build_iso.yml"
-          - "╚══════════════════════════════════════════════════════════════╝"
+      failed_when: _distrobox_enter.rc != 0
