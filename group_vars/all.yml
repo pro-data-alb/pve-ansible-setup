@@ -1,0 +1,54 @@
+---
+# =============================================================================
+# group_vars/all.yml – Globale Einstellungen für alle Hosts
+# =============================================================================
+
+# -- Locale / Timezone --------------------------------------------------------
+pve_timezone: "Europe/Berlin"
+pve_keyboard: "de"
+pve_country:  "de"
+pve_mailto:   "admin@example.local"
+
+# -- Credentials (Produktion: ansible-vault!) ----------------------------------
+# Generieren mit: mkpasswd --method=yescrypt
+pve_root_password_hashed: "$y$j9T$CHANGEME_USE_MKPASSWD$CHANGEME"
+pve_root_ssh_keys:
+  - "ssh-ed25519 AAAAC3... admin@workstation"
+
+# -- ISO-Quelle ----------------------------------------------------------------
+pve_iso_url:             "https://enterprise.proxmox.com/iso/proxmox-ve_9.1-1.iso"
+pve_iso_filename:        "proxmox-ve_9.1-1.iso"
+pve_iso_output_dir:      "/tmp/pve-iso-build"
+pve_iso_output_filename: "proxmox-ve_9.1-1_unattended.iso"
+
+# -- Netzwerk (Installer) ------------------------------------------------------
+# from-dhcp: FQDN aus DHCP Option 12; from-answer: statische Config
+pve_network_source: "from-dhcp"
+
+# -- Disk-Setup ----------------------------------------------------------------
+# Node-spezifisch in host_vars überschreibbar
+pve_disk_filesystem:   "zfs"
+pve_disk_zfs_raid:     "raid1"
+pve_disk_zfs_ashift:   12
+pve_disk_zfs_compress: "lz4"
+pve_disk_zfs_arc_max:  4096        # MiB
+pve_disk_filter_key:   "ID_MODEL"
+pve_disk_filter_value: "Samsung*"
+# Alternativ explizite Liste (in host_vars setzen):
+# pve_disk_list: ["sda", "sdb"]
+
+# -- First-Boot ----------------------------------------------------------------
+# fully-up | network-online | before-network
+pve_first_boot_ordering: "fully-up"
+pve_reboot_mode:         "reboot"
+pve_reboot_on_error:     false
+
+# -- Post-Install Webhook (optional) ------------------------------------------
+pve_webhook_url: ""
+
+# -- PVE API-Credentials -------------------------------------------------------
+# Produktion: ansible-vault encrypt_string verwenden!
+pve_api_port:           8006
+pve_api_user:           "root@pam"
+pve_api_password:       "CHANGEME"
+pve_api_validate_certs: false

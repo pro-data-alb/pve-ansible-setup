@@ -1,0 +1,64 @@
+# ── Proxmox VE 9 Answer File ──────────────────────────────────────────────────
+# PVE 9+: ausschließlich kebab-case Keys!
+# Doku: https://pve.proxmox.com/wiki/Automated_Installation
+
+[global]
+keyboard             = "{{ pve_keyboard }}"
+country              = "{{ pve_country }}"
+timezone             = "{{ pve_timezone }}"
+mailto               = "{{ pve_mailto }}"
+root-password-hashed = "{{ pve_root_password_hashed }}"
+reboot-on-error      = {{ pve_reboot_on_error | lower }}
+reboot-mode          = "{{ pve_reboot_mode | default('reboot') }}"
+
+{% if pve_root_ssh_keys is defined and pve_root_ssh_keys | length > 0 %}
+root-ssh-keys = [
+{% for key in pve_root_ssh_keys %}
+  "{{ key }}"{{ "," if not loop.last else "" }}
+{% endfor %}
+]
+{% endif %}
+
+[global.fqdn]
+source = "from-dhcp"
+domain = "{{ pve_domain }}"
+
+[network]
+source = "{{ pve_network_source }}"
+{% if pve_network_source == 'from-answer' %}
+cidr    = "{{ pve_node_ip }}/{{ pve_node_cidr_prefix }}"
+gateway = "{{ pve_node_gw }}"
+dns     = "{{ pve_node_dns }}"
+{% endif %}
+
+[disk-setup]
+filesystem = "{{ pve_disk_filesystem }}"
+{% if pve_disk_filesystem == 'zfs' %}
+zfs.raid     = "{{ pve_disk_zfs_raid }}"
+zfs.ashift   = {{ pve_disk_zfs_ashift | default(12) }}
+zfs.compress = "{{ pve_disk_zfs_compress | default('lz4') }}"
+{% if pve_disk_zfs_arc_max is defined %}
+zfs.arc-max  = {{ pve_disk_zfs_arc_max }}
+{% endif %}
+{% elif pve_disk_filesystem in ['ext4', 'xfs'] %}
+lvm.swapsize = {{ pve_disk_lvm_swapsize | default(8) }}
+lvm.maxvz    = {{ pve_disk_lvm_maxvz | default(0) }}
+{% elif pve_disk_filesystem == 'btrfs' %}
+btrfs.raid    = "{{ pve_disk_btrfs_raid | default('raid1') }}"
+btrfs.compress = "{{ pve_disk_btrfs_compress | default('zstd') }}"
+{% endif %}
+{% if pve_disk_list is defined and pve_disk_list | length > 0 %}
+disk-list    = [{{ pve_disk_list | map('to_json') | join(', ') }}]
+{% else %}
+filter.{{ pve_disk_filter_key }} = "{{ pve_disk_filter_value }}"
+filter-match = "any"
+{% endif %}
+
+[first-boot]
+source   = "from-iso"
+ordering = "{{ pve_first_boot_ordering }}"
+{% if pve_webhook_url is defined and pve_webhook_url | length > 0 %}
+
+[post-installation-webhook]
+url = "{{ pve_webhook_url }}"
+{% endif %}

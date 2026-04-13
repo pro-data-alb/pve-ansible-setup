@@ -1,0 +1,113 @@
+---
+# =============================================================================
+# pve_cluster_init – Idempotentes Cluster-Setup
+#
+# Ablauf:
+#   1. Primary Node: pvecm create <name> (falls Cluster noch nicht existiert)
+#   2. Primary propagiert seine IP an alle anderen Play-Hosts
+#   3. Secondary Nodes: pvecm add <primary_ip> (falls noch nicht im Cluster)
+# =============================================================================
+
+- name: "cluster | Aktuellen Cluster-Status prüfen"
+  ansible.builtin.command:
+    cmd: pvecm status
+  register: _pvecm_status
+  changed_when: false
+  failed_when:  false
+
+- name: "cluster | Zustandsfacts setzen"
+  ansible.builtin.set_fact:
+    _cluster_exists:  "{{ 'Name:' in _pvecm_status.stdout }}"
+    _node_in_cluster: "{{ pve_cluster_name in _pvecm_status.stdout }}"
+
+# -- Primary Node: Cluster erstellen ------------------------------------------
+- name: "cluster | [PRIMARY] Cluster erstellen"
+  when:
+    - pve_cluster_primary | default(false) | bool
+    - not (_cluster_exists | bool)
+  block:
+    - name: "cluster | pvecm create {{ pve_cluster_name }}"
+      ansible.builtin.command:
+        cmd: >-
+          pvecm create {{ pve_cluster_name }}
+          --link0 {{ pve_node_ip }}
+          {% if pve_cluster_link1_ip is defined and pve_cluster_link1_ip | length > 0 %}
+          --link1 {{ pve_cluster_link1_ip }}
+          {% endif %}
+      register: _pvecm_create
+      changed_when: _pvecm_create.rc == 0
+
+    - name: "cluster | Warten bis Quorate: Yes"
+      ansible.builtin.command:
+        cmd: pvecm status
+      register: _cluster_ready
+      until:   "'Quorate: Yes' in _cluster_ready.stdout"
+      retries: 20
+      delay:   5
+      changed_when: false
+
+# -- Primary IP an alle Nodes weitergeben -------------------------------------
+- name: "cluster | Primary-IP als delegierter Fact propagieren"
+  ansible.builtin.set_fact:
+    pve_cluster_primary_ip: "{{ pve_node_ip }}"
+  delegate_to:    "{{ item }}"
+  delegate_facts: true
+  loop:           "{{ ansible_play_hosts }}"
+  when: pve_cluster_primary | default(false) | bool
+
+# -- Secondary Nodes: Cluster beitreten ---------------------------------------
+- name: "cluster | [SECONDARY] Node dem Cluster hinzufügen"
+  when:
+    - not (pve_cluster_primary | default(false) | bool)
+    - not (_node_in_cluster | bool)
+    - pve_cluster_primary_ip is defined
+    - pve_cluster_primary_ip | length > 0
+  block:
+    - name: "cluster | SSH-Fingerprint des Primary Nodes akzeptieren"
+      ansible.builtin.known_hosts:
+        name:  "{{ pve_cluster_primary_ip }}"
+        state: present
+        key:   "{{ lookup('pipe', 'ssh-keyscan -t ed25519 ' ~ pve_cluster_primary_ip) }}"
+
+    - name: "cluster | pvecm add {{ pve_cluster_primary_ip }}"
+      ansible.builtin.expect:
+        command: >-
+          pvecm add {{ pve_cluster_primary_ip }}
+          --link0 {{ pve_node_ip }}
+          {% if pve_cluster_link1_ip is defined and pve_cluster_link1_ip | length > 0 %}
+          --link1 {{ pve_cluster_link1_ip }}
+          {% endif %}
+          --use_ssh
+        responses:
+          'password for root@': "{{ pve_api_password }}"
+          'Are you sure':        "yes"
+        timeout: 120
+      register: _pvecm_add
+      changed_when: _pvecm_add.rc == 0
+
+    - name: "cluster | Warten bis Node in pvecm nodes sichtbar"
+      ansible.builtin.command:
+        cmd: pvecm nodes
+      register: _pvecm_nodes
+      until:   inventory_hostname in _pvecm_nodes.stdout
+      retries: 30
+      delay:   5
+      changed_when: false
+      delegate_to: >-
+        {{ ansible_play_hosts
+           | map('extract', hostvars)
+           | selectattr('pve_cluster_primary', 'equalto', true)
+           | map(attribute='inventory_hostname')
+           | first }}
+
+# -- Finaler Status -----------------------------------------------------------
+- name: "cluster | Status ausgeben"
+  ansible.builtin.command:
+    cmd: pvecm status
+  register: _final_status
+  changed_when: false
+  failed_when:  false
+
+- name: "cluster | Status anzeigen"
+  ansible.builtin.debug:
+    msg: "{{ _final_status.stdout_lines }}"

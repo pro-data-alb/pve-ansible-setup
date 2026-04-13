@@ -1,0 +1,23 @@
+---
+- name: "lldpd | Konfigurationsverzeichnis anlegen"
+  ansible.builtin.file:
+    path:  /etc/lldpd.d
+    state: directory
+    mode:  "0755"
+
+- name: "lldpd | Konfiguration schreiben"
+  ansible.builtin.copy:
+    dest: /etc/lldpd.d/00-proxmox.conf
+    content: |
+      configure lldp portidsubtype {{ lldpd_port_id_subtype | default('macaddress') }}
+      configure system description "{{ lldpd_system_description | default('Proxmox VE Node') }}"
+      configure system platform "Proxmox VE"
+      configure lldp tx-interval 30
+    mode: "0644"
+  notify: lldpd neu starten
+
+- name: "lldpd | Dienst aktivieren und starten"
+  ansible.builtin.systemd:
+    name:    lldpd
+    enabled: true
+    state:   started

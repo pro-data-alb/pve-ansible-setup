@@ -1,0 +1,113 @@
+---
+# =============================================================================
+# group_vars/proxmox_nodes.yml – Gilt für alle PVE-Nodes
+# Node-spezifische Werte (IPs, Bond-Slaves) → host_vars/<hostname>.yml
+# =============================================================================
+
+# -- APT -----------------------------------------------------------------------
+pve_use_subscription: false
+
+# -- Pakete --------------------------------------------------------------------
+pve_extra_packages:
+  - lldpd
+  - vim
+  - htop
+  - iotop
+  - curl
+  - wget
+  - net-tools
+  - tcpdump
+  - ethtool
+  - iperf3
+  - python3-expect     # benötigt für pvecm add (ansible.builtin.expect)
+
+# -- lldpd ---------------------------------------------------------------------
+lldpd_configure:          true
+lldpd_system_description: "Proxmox VE Node"
+lldpd_port_id_subtype:    "macaddress"   # macaddress | ifname
+
+# -- NTP -----------------------------------------------------------------------
+pve_ntp_servers:
+  - "0.de.pool.ntp.org"
+  - "1.de.pool.ntp.org"
+  - "2.de.pool.ntp.org"
+
+# -- SSH -----------------------------------------------------------------------
+pve_ssh_permit_root_login: "prohibit-password"
+pve_ssh_password_auth:     "no"
+
+# =============================================================================
+# Netzwerk – Bond/Bridge Defaults
+#
+# KRITISCH: bond_lacp_rate MUSS "fast" sein wenn Bonds für Corosync genutzt
+# werden – sonst 90s Failover → HA-Fencing vor Link-Erkennung!
+# Slow (default) = LACPDU alle 30s → Failover 90s → Fencing nach ~60s
+# Fast           = LACPDU jede  1s → Failover  3s → kein ungewolltes Fencing
+# Quelle: https://pve.proxmox.com/wiki/Cluster_Manager#pvecm_corosync_over_bonds
+# WICHTIG: Auch am Switch LACP fast rate aktivieren!
+# =============================================================================
+
+# -- bond0 – Management + Corosync --------------------------------------------
+# Slaves: pve_bond0_slaves in host_vars/<node>.yml
+pve_bond0_name:             "bond0"
+pve_bond0_mode:             "802.3ad"
+pve_bond0_xmit_hash_policy: "layer3+4"
+pve_bond0_lacp_rate:        "fast"   # PFLICHT für Corosync-Bonds!
+pve_bond0_miimon:           100
+
+# -- bond1 – Storage (NFS / iSCSI) --------------------------------------------
+# Slaves:  pve_bond1_slaves  in host_vars/<node>.yml
+# Bridges: pve_storage_bridges in host_vars/<node>.yml
+pve_bond1_name:             "bond1"
+pve_bond1_mode:             "802.3ad"
+pve_bond1_xmit_hash_policy: "layer3+4"
+pve_bond1_lacp_rate:        "fast"
+pve_bond1_miimon:           100
+pve_bond1_enabled:          false    # Override in host_vars auf true
+
+# -- bond2 – VM-Traffic / SDN VLAN-aware --------------------------------------
+# Slaves: pve_bond2_slaves in host_vars/<node>.yml
+pve_bond2_name:             "bond2"
+pve_bond2_mode:             "802.3ad"
+pve_bond2_xmit_hash_policy: "layer3+4"
+pve_bond2_lacp_rate:        "fast"
+pve_bond2_miimon:           100
+pve_bond2_enabled:          false    # Override in host_vars auf true
+
+# -- Management-Bridge vmbr0 --------------------------------------------------
+pve_mgmt_bridge:      "vmbr0"
+pve_mgmt_bridge_stp:  "off"
+pve_mgmt_bridge_fd:   0
+
+# -- VM-Traffic-Bridge (SDN VLAN-aware) ---------------------------------------
+pve_data_bridge:      "vmbrData"
+pve_data_bridge_vlan: true
+
+# =============================================================================
+# Proxmox SDN
+# =============================================================================
+pve_sdn_enabled:   true
+pve_sdn_zone_id:   "vxlan01"
+pve_sdn_zone_type: "vxlan"
+
+pve_sdn_vxlan_peers: []   # Wird im Playbook aus ansible_play_hosts befüllt
+
+pve_sdn_vnets:
+  - id:    "vnet100"
+    zone:  "vxlan01"
+    tag:   100
+    alias: "Tenant-A Web-Tier"
+  - id:    "vnet200"
+    zone:  "vxlan01"
+    tag:   200
+    alias: "Tenant-B DB-Tier"
+
+pve_sdn_subnets:
+  - vnet:    "vnet100"
+    subnet:  "10.100.0.0/24"
+    gateway: "10.100.0.1"
+    snat:    false
+  - vnet:    "vnet200"
+    subnet:  "10.200.0.0/24"
+    gateway: "10.200.0.1"
+    snat:    false

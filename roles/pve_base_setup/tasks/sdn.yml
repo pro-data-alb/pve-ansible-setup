@@ -1,0 +1,129 @@
+---
+# SDN-Tasks nur auf dem primären Node – PVE repliziert im Cluster automatisch
+- name: SDN nur auf primärem Node konfigurieren
+  when: inventory_hostname == pve_sdn_primary_node
+  block:
+    - name: "sdn | API-Ticket holen"
+      ansible.builtin.uri:
+        url:            "https://{{ pve_api_host }}:{{ pve_api_port }}/api2/json/access/ticket"
+        method:         POST
+        validate_certs: "{{ pve_api_validate_certs }}"
+        body_format:    form-urlencoded
+        body:
+          username: "{{ pve_api_user }}"
+          password: "{{ pve_api_password }}"
+        status_code: 200
+      register: _sdn_ticket_raw
+      no_log: true
+
+    - name: "sdn | Credentials setzen"
+      ansible.builtin.set_fact:
+        _sdn_ticket: "{{ _sdn_ticket_raw.json.data.ticket }}"
+        _sdn_csrf:   "{{ _sdn_ticket_raw.json.data.CSRFPreventionToken }}"
+      no_log: true
+
+    - name: "sdn | Bestehende Zonen abfragen"
+      ansible.builtin.uri:
+        url:            "https://{{ pve_api_host }}:{{ pve_api_port }}/api2/json/cluster/sdn/zones"
+        method:         GET
+        validate_certs: "{{ pve_api_validate_certs }}"
+        headers:
+          Cookie: "PVEAuthCookie={{ _sdn_ticket }}"
+        status_code: 200
+      register: _sdn_zones_existing
+
+    - name: "sdn | Zone anlegen"
+      ansible.builtin.uri:
+        url:            "https://{{ pve_api_host }}:{{ pve_api_port }}/api2/json/cluster/sdn/zones"
+        method:         POST
+        validate_certs: "{{ pve_api_validate_certs }}"
+        headers:
+          Cookie:              "PVEAuthCookie={{ _sdn_ticket }}"
+          CSRFPreventionToken: "{{ _sdn_csrf }}"
+        body_format: json
+        body:
+          zone:  "{{ pve_sdn_zone_id }}"
+          type:  "{{ pve_sdn_zone_type }}"
+          peers: "{{ pve_sdn_vxlan_peers | join(',') }}"
+          mtu:   1450
+        status_code: [200, 201]
+      when: >
+        pve_sdn_zone_id not in
+        (_sdn_zones_existing.json.data | map(attribute='zone') | list)
+      register: _sdn_zone_result
+
+    - name: "sdn | Bestehende VNets abfragen"
+      ansible.builtin.uri:
+        url:            "https://{{ pve_api_host }}:{{ pve_api_port }}/api2/json/cluster/sdn/vnets"
+        method:         GET
+        validate_certs: "{{ pve_api_validate_certs }}"
+        headers:
+          Cookie: "PVEAuthCookie={{ _sdn_ticket }}"
+        status_code: 200
+      register: _sdn_vnets_existing
+
+    - name: "sdn | VNets anlegen"
+      ansible.builtin.uri:
+        url:            "https://{{ pve_api_host }}:{{ pve_api_port }}/api2/json/cluster/sdn/vnets"
+        method:         POST
+        validate_certs: "{{ pve_api_validate_certs }}"
+        headers:
+          Cookie:              "PVEAuthCookie={{ _sdn_ticket }}"
+          CSRFPreventionToken: "{{ _sdn_csrf }}"
+        body_format: json
+        body:
+          vnet:  "{{ item.id }}"
+          zone:  "{{ item.zone }}"
+          tag:   "{{ item.tag }}"
+          alias: "{{ item.alias | default('') }}"
+        status_code: [200, 201]
+      loop: "{{ pve_sdn_vnets }}"
+      loop_control:
+        label: "{{ item.id }}"
+      when: >
+        item.id not in
+        (_sdn_vnets_existing.json.data | map(attribute='vnet') | list)
+      register: _vnet_results
+
+    - name: "sdn | Subnets anlegen (IPAM)"
+      ansible.builtin.uri:
+        url:            "https://{{ pve_api_host }}:{{ pve_api_port }}/api2/json/cluster/sdn/vnets/{{ item.vnet }}/subnets"
+        method:         POST
+        validate_certs: "{{ pve_api_validate_certs }}"
+        headers:
+          Cookie:              "PVEAuthCookie={{ _sdn_ticket }}"
+          CSRFPreventionToken: "{{ _sdn_csrf }}"
+        body_format: json
+        body:
+          type:    "subnet"
+          subnet:  "{{ item.subnet }}"
+          gateway: "{{ item.gateway }}"
+          snat:    "{{ item.snat | int }}"
+        status_code: [200, 201, 500]
+      loop: "{{ pve_sdn_subnets }}"
+      loop_control:
+        label: "{{ item.subnet }}"
+      when:
+        - pve_sdn_subnets is defined
+        - pve_sdn_subnets | length > 0
+
+    - name: "sdn | Konfiguration auf alle Nodes anwenden"
+      ansible.builtin.uri:
+        url:            "https://{{ pve_api_host }}:{{ pve_api_port }}/api2/json/cluster/sdn"
+        method:         PUT
+        validate_certs: "{{ pve_api_validate_certs }}"
+        headers:
+          Cookie:              "PVEAuthCookie={{ _sdn_ticket }}"
+          CSRFPreventionToken: "{{ _sdn_csrf }}"
+        status_code: 200
+      when: >
+        (_sdn_zone_result is defined and _sdn_zone_result.changed | default(false)) or
+        (_vnet_results is defined and _vnet_results.changed | default(false))
+
+    - name: "sdn | Status ausgeben"
+      ansible.builtin.debug:
+        msg:
+          - "✅ SDN konfiguriert"
+          - "   Zone:  {{ pve_sdn_zone_id }} ({{ pve_sdn_zone_type }})"
+          - "   VNets: {{ pve_sdn_vnets | map(attribute='id') | list }}"
+          - "   Peers: {{ pve_sdn_vxlan_peers }}"

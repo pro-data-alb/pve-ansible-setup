@@ -1,0 +1,74 @@
+---
+- name: "iso | Build-Abhängigkeiten installieren"
+  ansible.builtin.apt:
+    name:
+      - proxmox-auto-install-assistant
+      - wget
+      - whois
+    state: present
+    update_cache: true
+  become: true
+  when: ansible_os_family == "Debian"
+
+- name: "iso | Arbeitsverzeichnis anlegen"
+  ansible.builtin.file:
+    path:  "{{ pve_iso_output_dir }}"
+    state: directory
+    mode:  "0755"
+
+- name: "iso | Quell-ISO herunterladen"
+  ansible.builtin.get_url:
+    url:  "{{ pve_iso_url }}"
+    dest: "{{ pve_iso_output_dir }}/{{ pve_iso_filename }}"
+    mode: "0644"
+  when: pve_iso_download | bool
+
+- name: "iso | Quell-ISO prüfen"
+  ansible.builtin.stat:
+    path: "{{ pve_iso_output_dir }}/{{ pve_iso_filename }}"
+  register: _iso_stat
+
+- name: "iso | Fehler wenn ISO fehlt"
+  ansible.builtin.fail:
+    msg: "Quell-ISO nicht gefunden: {{ pve_iso_output_dir }}/{{ pve_iso_filename }}"
+  when: not _iso_stat.stat.exists
+
+- name: "iso | answer.toml aus Template erzeugen"
+  ansible.builtin.template:
+    src:  answer.toml.j2
+    dest: "{{ pve_iso_output_dir }}/answer.toml"
+    mode: "0640"
+  register: _answer_changed
+
+- name: "iso | firstboot.sh aus Template erzeugen"
+  ansible.builtin.template:
+    src:  firstboot.sh.j2
+    dest: "{{ pve_iso_output_dir }}/firstboot.sh"
+    mode: "0750"
+  register: _firstboot_changed
+
+- name: "iso | answer.toml validieren"
+  ansible.builtin.command:
+    cmd: >-
+      proxmox-auto-install-assistant validate-answer
+      {{ pve_iso_output_dir }}/answer.toml
+  register: _validate_result
+  changed_when: false
+  when: pve_iso_validate_answer | bool
+
+- name: "iso | Output-ISO entfernen wenn Inputs geändert"
+  ansible.builtin.file:
+    path:  "{{ pve_iso_output_dir }}/{{ pve_iso_output_filename }}"
+    state: absent
+  when: _answer_changed.changed or _firstboot_changed.changed
+
+- name: "iso | Unattended ISO erzeugen"
+  ansible.builtin.command:
+    cmd: >-
+      proxmox-auto-install-assistant prepare-iso
+      {{ pve_iso_output_dir }}/{{ pve_iso_filename }}
+      --fetch-from {{ pve_answer_fetch_from }}
+      --answer-file {{ pve_iso_output_dir }}/answer.toml
+      --on-first-boot {{ pve_iso_output_dir }}/firstboot.sh
+      --output {{ pve_iso_output_dir }}/{{ pve_iso_output_filename }}
+    creates: "{{ pve_iso_output_dir }}/{{ pve_iso_output_filename }}"

@@ -1,0 +1,4 @@
+---
+pve_iso_download:        true
+pve_iso_validate_answer: true
+pve_answer_fetch_from:   "iso"   # iso | partition | http

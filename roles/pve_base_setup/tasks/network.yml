@@ -1,0 +1,256 @@
+---
+# =============================================================================
+# Netzwerk-Konfiguration via Proxmox REST API
+#
+# Topologie pro Node:
+#   bond0 (eno1+eno2)         LACP fast → vmbr0       (Management + Corosync)
+#   bond1 (ens1f0+ens1f1)     LACP fast → bond1.<vlan> → vmbr10/11/12 (Storage)
+#   bond2 (ens2f0+ens2f1)     LACP fast → vmbrData    (VM-Traffic, VLAN-aware)
+#
+# KRITISCH: bond_lacp_rate = fast
+#   Slow (default) = LACPDU alle 30s → Failover 90s → HA-Fencing nach ~60s!
+#   Fast           = LACPDU jede  1s → Failover  3s → kein ungewolltes Fencing
+#   Quelle: https://pve.proxmox.com/wiki/Cluster_Manager#pvecm_corosync_over_bonds
+# =============================================================================
+
+- name: "net | API-Ticket holen"
+  ansible.builtin.uri:
+    url:            "https://{{ pve_api_host }}:{{ pve_api_port }}/api2/json/access/ticket"
+    method:         POST
+    validate_certs: "{{ pve_api_validate_certs }}"
+    body_format:    form-urlencoded
+    body:
+      username: "{{ pve_api_user }}"
+      password: "{{ pve_api_password }}"
+    status_code: 200
+  register: _pve_ticket
+  no_log: true
+
+- name: "net | Credentials als Facts setzen"
+  ansible.builtin.set_fact:
+    _pve_auth: "{{ _pve_ticket.json.data.ticket }}"
+    _pve_csrf: "{{ _pve_ticket.json.data.CSRFPreventionToken }}"
+  no_log: true
+
+- name: "net | Bestehende Interfaces abfragen"
+  ansible.builtin.uri:
+    url:            "https://{{ pve_api_host }}:{{ pve_api_port }}/api2/json/nodes/{{ inventory_hostname }}/network"
+    method:         GET
+    validate_certs: "{{ pve_api_validate_certs }}"
+    headers:
+      Cookie: "PVEAuthCookie={{ _pve_auth }}"
+    status_code: 200
+  register: _existing_net
+
+- name: "net | Vorhandene Interface-Namen merken"
+  ansible.builtin.set_fact:
+    _existing_ifaces: "{{ _existing_net.json.data | map(attribute='iface') | list }}"
+
+# -- bond0: Management + Corosync ---------------------------------------------
+- name: "net | bond0 anlegen (Management/Corosync, LACP fast)"
+  ansible.builtin.uri:
+    url:            "https://{{ pve_api_host }}:{{ pve_api_port }}/api2/json/nodes/{{ inventory_hostname }}/network"
+    method:         POST
+    validate_certs: "{{ pve_api_validate_certs }}"
+    headers:
+      Cookie:              "PVEAuthCookie={{ _pve_auth }}"
+      CSRFPreventionToken: "{{ _pve_csrf }}"
+    body_format: json
+    body:
+      iface:                 "{{ pve_bond0_name }}"
+      type:                  "bond"
+      autostart:             1
+      slaves:                "{{ pve_bond0_slaves | join(' ') }}"
+      bond_mode:             "{{ pve_bond0_mode }}"
+      bond_xmit_hash_policy: "{{ pve_bond0_xmit_hash_policy }}"
+      bond_lacp_rate:        "{{ pve_bond0_lacp_rate }}"
+      bond_miimon:           "{{ pve_bond0_miimon }}"
+      comments:              "Management + Corosync Bond (LACP fast)"
+    status_code: [200, 201]
+  when: pve_bond0_name not in _existing_ifaces
+  register: _bond0
+
+# -- vmbr0: Management-Bridge -------------------------------------------------
+- name: "net | vmbr0 anlegen (Management-Bridge)"
+  ansible.builtin.uri:
+    url:            "https://{{ pve_api_host }}:{{ pve_api_port }}/api2/json/nodes/{{ inventory_hostname }}/network"
+    method:         POST
+    validate_certs: "{{ pve_api_validate_certs }}"
+    headers:
+      Cookie:              "PVEAuthCookie={{ _pve_auth }}"
+      CSRFPreventionToken: "{{ _pve_csrf }}"
+    body_format: json
+    body:
+      iface:        "{{ pve_mgmt_bridge }}"
+      type:         "bridge"
+      autostart:    1
+      bridge_ports: "{{ pve_bond0_name }}"
+      bridge_stp:   "{{ pve_mgmt_bridge_stp }}"
+      bridge_fd:    "{{ pve_mgmt_bridge_fd }}"
+      address:      "{{ pve_node_ip }}"
+      netmask:      "{{ pve_node_cidr_prefix }}"
+      gateway:      "{{ pve_node_gw }}"
+      comments:     "Management Bridge → {{ pve_bond0_name }}"
+    status_code: [200, 201]
+  when: pve_mgmt_bridge not in _existing_ifaces
+  register: _vmbr0
+
+# -- bond1: Storage-Bond + VLANs + Storage-Bridges ----------------------------
+- name: "net | bond1 anlegen (Storage-Bond, LACP fast)"
+  ansible.builtin.uri:
+    url:            "https://{{ pve_api_host }}:{{ pve_api_port }}/api2/json/nodes/{{ inventory_hostname }}/network"
+    method:         POST
+    validate_certs: "{{ pve_api_validate_certs }}"
+    headers:
+      Cookie:              "PVEAuthCookie={{ _pve_auth }}"
+      CSRFPreventionToken: "{{ _pve_csrf }}"
+    body_format: json
+    body:
+      iface:                 "{{ pve_bond1_name }}"
+      type:                  "bond"
+      autostart:             1
+      slaves:                "{{ pve_bond1_slaves | join(' ') }}"
+      bond_mode:             "{{ pve_bond1_mode }}"
+      bond_xmit_hash_policy: "{{ pve_bond1_xmit_hash_policy }}"
+      bond_lacp_rate:        "{{ pve_bond1_lacp_rate }}"
+      bond_miimon:           "{{ pve_bond1_miimon }}"
+      comments:              "Storage Bond (LACP fast)"
+    status_code: [200, 201]
+  when:
+    - pve_bond1_enabled | bool
+    - pve_bond1_name not in _existing_ifaces
+  register: _bond1
+
+- name: "net | VLAN-Interfaces für Storage anlegen (bond1.<vlan>)"
+  ansible.builtin.uri:
+    url:            "https://{{ pve_api_host }}:{{ pve_api_port }}/api2/json/nodes/{{ inventory_hostname }}/network"
+    method:         POST
+    validate_certs: "{{ pve_api_validate_certs }}"
+    headers:
+      Cookie:              "PVEAuthCookie={{ _pve_auth }}"
+      CSRFPreventionToken: "{{ _pve_csrf }}"
+    body_format: json
+    body:
+      iface:           "{{ pve_bond1_name }}.{{ item.vlan_id }}"
+      type:            "vlan"
+      autostart:       1
+      vlan-raw-device: "{{ pve_bond1_name }}"
+      vlan-id:         "{{ item.vlan_id }}"
+      comments:        "Storage VLAN {{ item.vlan_id }} – {{ item.comment | default('') }}"
+    status_code: [200, 201]
+  loop: "{{ pve_storage_bridges | default([]) }}"
+  loop_control:
+    label: "{{ pve_bond1_name }}.{{ item.vlan_id }}"
+  when:
+    - pve_bond1_enabled | bool
+    - pve_storage_bridges is defined
+    - (pve_bond1_name ~ '.' ~ item.vlan_id) not in _existing_ifaces
+  register: _storage_vlans
+
+- name: "net | Storage-Bridges anlegen (vmbr10/11/12)"
+  ansible.builtin.uri:
+    url:            "https://{{ pve_api_host }}:{{ pve_api_port }}/api2/json/nodes/{{ inventory_hostname }}/network"
+    method:         POST
+    validate_certs: "{{ pve_api_validate_certs }}"
+    headers:
+      Cookie:              "PVEAuthCookie={{ _pve_auth }}"
+      CSRFPreventionToken: "{{ _pve_csrf }}"
+    body_format: json
+    body:
+      iface:        "{{ item.iface }}"
+      type:         "bridge"
+      autostart:    1
+      bridge_ports: "{{ pve_bond1_name }}.{{ item.vlan_id }}"
+      bridge_stp:   "off"
+      bridge_fd:    0
+      address:      "{{ item.address }}"
+      netmask:      "{{ item.netmask }}"
+      comments:     "{{ item.comment | default(item.iface) }} – VLAN {{ item.vlan_id }}"
+    status_code: [200, 201]
+  loop: "{{ pve_storage_bridges | default([]) }}"
+  loop_control:
+    label: "{{ item.iface }}"
+  when:
+    - pve_bond1_enabled | bool
+    - pve_storage_bridges is defined
+    - item.iface not in _existing_ifaces
+  register: _storage_bridges
+
+# -- bond2: VM-Traffic-Bond ---------------------------------------------------
+- name: "net | bond2 anlegen (VM-Traffic-Bond, LACP fast)"
+  ansible.builtin.uri:
+    url:            "https://{{ pve_api_host }}:{{ pve_api_port }}/api2/json/nodes/{{ inventory_hostname }}/network"
+    method:         POST
+    validate_certs: "{{ pve_api_validate_certs }}"
+    headers:
+      Cookie:              "PVEAuthCookie={{ _pve_auth }}"
+      CSRFPreventionToken: "{{ _pve_csrf }}"
+    body_format: json
+    body:
+      iface:                 "{{ pve_bond2_name }}"
+      type:                  "bond"
+      autostart:             1
+      slaves:                "{{ pve_bond2_slaves | join(' ') }}"
+      bond_mode:             "{{ pve_bond2_mode }}"
+      bond_xmit_hash_policy: "{{ pve_bond2_xmit_hash_policy }}"
+      bond_lacp_rate:        "{{ pve_bond2_lacp_rate }}"
+      bond_miimon:           "{{ pve_bond2_miimon }}"
+      comments:              "VM-Traffic Bond (LACP fast)"
+    status_code: [200, 201]
+  when:
+    - pve_bond2_enabled | bool
+    - pve_bond2_name not in _existing_ifaces
+  register: _bond2
+
+- name: "net | vmbrData anlegen (VM-Traffic-Bridge, VLAN-aware)"
+  ansible.builtin.uri:
+    url:            "https://{{ pve_api_host }}:{{ pve_api_port }}/api2/json/nodes/{{ inventory_hostname }}/network"
+    method:         POST
+    validate_certs: "{{ pve_api_validate_certs }}"
+    headers:
+      Cookie:              "PVEAuthCookie={{ _pve_auth }}"
+      CSRFPreventionToken: "{{ _pve_csrf }}"
+    body_format: json
+    body:
+      iface:             "{{ pve_data_bridge }}"
+      type:              "bridge"
+      autostart:         1
+      bridge_ports:      "{{ pve_bond2_name }}"
+      bridge_stp:        "off"
+      bridge_fd:         0
+      bridge_vlan_aware: 1
+      comments:          "VM-Traffic Bridge (VLAN-aware/SDN) → {{ pve_bond2_name }}"
+    status_code: [200, 201]
+  when:
+    - pve_bond2_enabled | bool
+    - pve_data_bridge not in _existing_ifaces
+  register: _vmbrdata
+
+# -- Commit -------------------------------------------------------------------
+- name: "net | Netzwerkkonfiguration committen (pvenetcommit)"
+  ansible.builtin.uri:
+    url:            "https://{{ pve_api_host }}:{{ pve_api_port }}/api2/json/nodes/{{ inventory_hostname }}/network"
+    method:         PUT
+    validate_certs: "{{ pve_api_validate_certs }}"
+    headers:
+      Cookie:              "PVEAuthCookie={{ _pve_auth }}"
+      CSRFPreventionToken: "{{ _pve_csrf }}"
+    status_code: 200
+  when: >
+    (_bond0 is defined and _bond0.changed | default(false)) or
+    (_vmbr0 is defined and _vmbr0.changed | default(false)) or
+    (_bond1 is defined and _bond1.changed | default(false)) or
+    (_storage_vlans is defined and _storage_vlans.changed | default(false)) or
+    (_storage_bridges is defined and _storage_bridges.changed | default(false)) or
+    (_bond2 is defined and _bond2.changed | default(false)) or
+    (_vmbrdata is defined and _vmbrdata.changed | default(false))
+  register: _net_commit
+
+- name: "net | Zusammenfassung"
+  ansible.builtin.debug:
+    msg:
+      - "Netzwerk-Setup {{ inventory_hostname }}:"
+      - "  bond0  ({{ pve_bond0_slaves | join('+') }}) → {{ pve_mgmt_bridge }}  [LACP fast]"
+      - "  bond1  ({{ pve_bond1_slaves | default([]) | join('+') }}) → Storage-Bridges  [LACP fast]  enabled={{ pve_bond1_enabled }}"
+      - "  bond2  ({{ pve_bond2_slaves | default([]) | join('+') }}) → {{ pve_data_bridge }}  [LACP fast]  enabled={{ pve_bond2_enabled }}"
+      - "  Commit: {{ _net_commit.changed | default(false) }}"

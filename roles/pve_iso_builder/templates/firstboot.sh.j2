@@ -1,0 +1,100 @@
+#!/usr/bin/env bash
+# ── Proxmox VE First-Boot Hook ─────────────────────────────────────────────────
+# Systemd-Service: proxmox-first-boot.service
+# Log:             /var/log/pve-firstboot.log
+set -euo pipefail
+exec > >(tee -a /var/log/pve-firstboot.log) 2>&1
+
+log() { echo "[firstboot $(date '+%H:%M:%S')] $*"; }
+log "=== Start (ordering: ${1:-unknown}) ==="
+
+wait_for_apt() {
+    local r=30
+    while ! flock -n /var/lib/dpkg/lock-frontend -c true 2>/dev/null; do
+        (( r-- <= 0 )) && { log "ERROR: APT-Lock Timeout"; exit 1; }
+        sleep 3
+    done
+}
+
+{% if not pve_use_subscription %}
+log "Enterprise-Repos deaktivieren"
+for f in /etc/apt/sources.list.d/pve-enterprise.list \
+          /etc/apt/sources.list.d/ceph.list; do
+    [ -f "$f" ] && sed -i 's|^deb |# deb |g' "$f"
+done
+cat > /etc/apt/sources.list.d/pve-no-subscription.list <<'EOF'
+deb http://download.proxmox.com/debian/pve trixie pve-no-subscription
+EOF
+cat > /etc/apt/sources.list <<'EOF'
+deb http://deb.debian.org/debian trixie main contrib non-free-firmware
+deb http://deb.debian.org/debian trixie-updates main contrib non-free-firmware
+deb http://security.debian.org/debian-security trixie-security main contrib non-free-firmware
+EOF
+{% endif %}
+
+wait_for_apt
+DEBIAN_FRONTEND=noninteractive apt-get update -qq
+DEBIAN_FRONTEND=noninteractive apt-get install -y \
+{% for pkg in pve_extra_packages | default(['lldpd']) %}
+  {{ pkg }}{% if not loop.last %} \{% endif %}
+
+{% endfor %}
+
+{% if lldpd_configure | default(true) %}
+log "lldpd konfigurieren"
+mkdir -p /etc/lldpd.d
+cat > /etc/lldpd.d/00-proxmox.conf <<'EOF'
+configure lldp portidsubtype {{ lldpd_port_id_subtype | default('macaddress') }}
+configure system description "{{ lldpd_system_description | default('Proxmox VE Node') }}"
+configure system platform "Proxmox VE"
+configure lldp tx-interval 30
+EOF
+systemctl enable --now lldpd
+{% endif %}
+
+{% if pve_ntp_servers is defined %}
+log "NTP konfigurieren"
+cat > /etc/systemd/timesyncd.conf <<'EOF'
+[Time]
+NTP={{ pve_ntp_servers | join(' ') }}
+FallbackNTP=pool.ntp.org
+EOF
+systemctl restart systemd-timesyncd && timedatectl set-ntp true
+{% endif %}
+
+log "SSH härten"
+declare -A SSH_OPTS=(
+  ["PermitRootLogin"]="{{ pve_ssh_permit_root_login | default('prohibit-password') }}"
+  ["PasswordAuthentication"]="{{ pve_ssh_password_auth | default('no') }}"
+  ["X11Forwarding"]="no"
+  ["MaxAuthTries"]="3"
+  ["LoginGraceTime"]="30"
+)
+for key in "${!SSH_OPTS[@]}"; do
+    val="${SSH_OPTS[$key]}"
+    if grep -qE "^#?${key}" /etc/ssh/sshd_config; then
+        sed -i "s|^#\?${key}.*|${key} ${val}|" /etc/ssh/sshd_config
+    else
+        echo "${key} ${val}" >> /etc/ssh/sshd_config
+    fi
+done
+systemctl restart ssh
+
+cat > /etc/sysctl.d/99-pve.conf <<'EOF'
+net.ipv4.ip_forward = 1
+net.ipv6.conf.all.forwarding = 1
+net.ipv4.tcp_syncookies = 1
+kernel.kptr_restrict = 2
+kernel.dmesg_restrict = 1
+EOF
+sysctl --system >/dev/null 2>&1
+
+{% if not pve_use_subscription %}
+log "Subscription-Warnung deaktivieren"
+PVEUI="/usr/share/javascript/proxmox-widget-toolkit/proxmoxlib.js"
+[ -f "$PVEUI" ] && cp "$PVEUI" "${PVEUI}.bak" && \
+  sed -i "s/Ext.Msg.show({/void({/g" "$PVEUI" 2>/dev/null || true
+{% endif %}
+
+log "=== First-Boot abgeschlossen ==="
+touch /var/lib/pve-firstboot-done

@@ -1,0 +1,21 @@
+---
+- name: APT-Repositories konfigurieren
+  ansible.builtin.import_tasks: repos.yml
+  when: pve_configure_repos | bool
+
+- name: Pakete installieren und System aktualisieren
+  ansible.builtin.import_tasks: packages.yml
+
+- name: lldpd konfigurieren
+  ansible.builtin.import_tasks: lldpd.yml
+  when: lldpd_configure | bool
+
+- name: Netzwerk konfigurieren (Bonds + Bridges)
+  ansible.builtin.import_tasks: network.yml
+  when: pve_configure_network | bool
+
+- name: Proxmox SDN konfigurieren
+  ansible.builtin.import_tasks: sdn.yml
+  when:
+    - pve_sdn_enabled | bool
+    - pve_configure_sdn | bool

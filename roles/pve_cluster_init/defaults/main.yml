@@ -1,0 +1,3 @@
+---
+pve_cluster_primary:  false
+pve_cluster_link1_ip: ""

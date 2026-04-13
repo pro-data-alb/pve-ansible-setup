@@ -1,0 +1,36 @@
+---
+# =============================================================================
+# host_vars – pve-beta-01
+# =============================================================================
+
+pve_node_ip:          "192.168.20.11"
+pve_node_cidr_prefix: "24"
+pve_node_gw:          "192.168.20.1"
+pve_node_dns:         "192.168.20.1"
+pve_cluster_link1_ip: ""
+
+pve_bond0_slaves:
+  - "eno1"
+  - "eno2"
+
+pve_bond1_enabled: true
+pve_bond1_slaves:
+  - "ens1f0"
+  - "ens1f1"
+
+pve_storage_bridges:
+  - iface:   "vmbr10"
+    vlan_id: 10
+    address: "10.20.10.11"
+    netmask: "24"
+    comment: "NFS Storage"
+  - iface:   "vmbr11"
+    vlan_id: 11
+    address: "10.20.11.11"
+    netmask: "24"
+    comment: "iSCSI-1"
+
+pve_bond2_enabled: true
+pve_bond2_slaves:
+  - "ens2f0"
+  - "ens2f1"

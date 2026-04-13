@@ -1,0 +1,91 @@
+---
+# =============================================================================
+# Playbook 2 – Proxmox VE 9 Basis-Einrichtung + Cluster-Setup
+#
+# Ausführen:
+#   Alle Cluster:      ansible-playbook 02_base_setup.yml
+#   Einzelner Cluster: ansible-playbook 02_base_setup.yml --limit pve_cluster_alpha
+#   Einzelner Node:    ansible-playbook 02_base_setup.yml --limit pve-alpha-01
+# =============================================================================
+
+# --- Play 1: Basis-Setup -------------------------------------------------------
+- name: Proxmox VE Basis-Einrichtung
+  hosts: proxmox_nodes
+  gather_facts: true
+  become: true
+  serial: 1
+
+  pre_tasks:
+    - name: Warten bis Node per SSH erreichbar ist
+      ansible.builtin.wait_for_connection:
+        timeout: 180
+        delay:   5
+
+    - name: Sicherstellen – PVE 9 (Debian 13 Trixie)
+      ansible.builtin.assert:
+        that:
+          - ansible_os_family == "Debian"
+          - ansible_distribution_release == "trixie"
+        fail_msg: >
+          Kein PVE 9 (Trixie) Node!
+          OS: {{ ansible_os_family }} / {{ ansible_distribution_release }}
+
+    - name: PVE-Version ermitteln
+      ansible.builtin.command:
+        cmd: pveversion
+      register: _pve_version
+      changed_when: false
+
+    - name: PVE-Version anzeigen
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }}: {{ _pve_version.stdout }}"
+
+  roles:
+    - role: pve_base_setup
+
+  post_tasks:
+    - name: LLDP-Nachbarn anzeigen (Switch-Port-Identifikation für Netzwerker)
+      ansible.builtin.command:
+        cmd: lldpcli show neighbors
+      register: _lldp
+      changed_when: false
+      ignore_errors: true
+
+    - name: LLDP-Output
+      ansible.builtin.debug:
+        msg: "{{ _lldp.stdout_lines }}"
+      when: _lldp.rc | default(1) == 0
+
+    - name: PVE API-Erreichbarkeit testen
+      ansible.builtin.uri:
+        url:            "https://{{ pve_node_ip }}:{{ pve_api_port }}/api2/json/version"
+        validate_certs: "{{ pve_api_validate_certs }}"
+        status_code:    200
+      register: _api_test
+      ignore_errors: true
+
+# --- Play 2: Cluster-Setup (Primary ZUERST via order: inventory) ---------------
+- name: Proxmox Cluster initialisieren
+  hosts: proxmox_nodes
+  gather_facts: false
+  become: true
+  order: inventory
+
+  pre_tasks:
+    - name: Cluster-Name sicherstellen
+      ansible.builtin.assert:
+        that:
+          - pve_cluster_name is defined
+          - pve_cluster_name | length > 0
+        fail_msg: "pve_cluster_name fehlt! In group_vars/<cluster_group>.yml setzen."
+
+  roles:
+    - role: pve_cluster_init
+
+  post_tasks:
+    - name: Cluster-Abschluss
+      ansible.builtin.debug:
+        msg:
+          - "✅ Cluster {{ pve_cluster_name }} – {{ inventory_hostname }}"
+          - "   primary: {{ pve_cluster_primary | default(false) }}"
+          - "   Web-UI:  https://{{ pve_node_ip }}:8006"

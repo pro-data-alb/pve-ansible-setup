@@ -1,0 +1,36 @@
+---
+# =============================================================================
+# Playbook 1 – Proxmox VE 9 Unattended ISO erzeugen
+# Ausführen: ansible-playbook 01_build_iso.yml
+# =============================================================================
+- name: Proxmox VE Unattended ISO erzeugen
+  hosts: iso_builder
+  gather_facts: true
+
+  pre_tasks:
+    - name: Prüfen – root-password-hashed gesetzt und kein Platzhalter
+      ansible.builtin.assert:
+        that:
+          - pve_root_password_hashed | length > 10
+          - "'CHANGEME' not in pve_root_password_hashed"
+        fail_msg: >
+          pve_root_password_hashed fehlt oder ist noch Platzhalter!
+          Generieren mit: mkpasswd --method=yescrypt
+
+    - name: Prüfen – SSH-Key vorhanden
+      ansible.builtin.assert:
+        that:
+          - pve_root_ssh_keys | length > 0
+        fail_msg: "pve_root_ssh_keys enthält keinen SSH Public Key!"
+
+  roles:
+    - role: pve_iso_builder
+
+  post_tasks:
+    - name: Zusammenfassung
+      ansible.builtin.debug:
+        msg:
+          - "✅ Unattended ISO fertig:"
+          - "   {{ pve_iso_output_dir }}/{{ pve_iso_output_filename }}"
+          - "➡  Nächster Schritt: ISO auf USB/IPMI laden, Node booten,"
+          - "   dann ansible-playbook 02_base_setup.yml ausführen."

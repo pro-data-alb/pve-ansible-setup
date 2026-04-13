@@ -1,0 +1,18 @@
+---
+- name: "pkg | System aktualisieren"
+  ansible.builtin.apt:
+    upgrade:      dist
+    update_cache: true
+  when: pve_update_system | bool
+  retries: 3
+  delay:   10
+
+- name: "pkg | Zusätzliche Pakete installieren"
+  ansible.builtin.apt:
+    name:  "{{ pve_extra_packages }}"
+    state: present
+
+- name: "pkg | Nicht benötigte Pakete entfernen"
+  ansible.builtin.apt:
+    autoremove: true
+    purge:      true
