@@ -3,9 +3,16 @@
 # Netzwerk-Konfiguration via Proxmox REST API
 #
 # Topologie pro Node:
-#   bond0 (eno1+eno2)         LACP fast → vmbr0       (Management + Corosync)
-#   bond1 (ens1f0+ens1f1)     LACP fast → bond1.<vlan> → vmbr10/11/12 (Storage)
-#   bond2 (ens2f0+ens2f1)     LACP fast → vmbrData    (VM-Traffic, VLAN-aware)
+#   bond0 (2x NIC, LACP fast) → vmbr0        (Management + Corosync)
+#   bond1 (2x NIC, LACP fast) → bond1.<vlan>  → vmbr10/11/12 (Storage)
+#   bond2 (2x NIC, LACP fast) → vmbrData      (VM-Traffic, VLAN-aware)
+#
+# NIC-Identifizierung:
+#   Interfacenamen sind hardware-/treiberabhängig und im Vorfeld unbekannt.
+#   Stattdessen werden MAC-Adressen (aus IPMI/Switch) in host_vars hinterlegt.
+#   mac_resolve.yml löst MACs → Kernel-Interfacenamen auf und schreibt
+#   persistente udev-Regeln für stabile Namen nach Reboots.
+#   Siehe: host_vars/<node>.yml → pve_nic_aliases
 #
 # KRITISCH: bond_lacp_rate = fast
 #   Slow (default) = LACPDU alle 30s → Failover 90s → HA-Fencing nach ~60s!
@@ -13,6 +20,11 @@
 #   Quelle: https://pve.proxmox.com/wiki/Cluster_Manager#pvecm_corosync_over_bonds
 # =============================================================================
 
+# -- Phase 1: MAC → Interfacename auflösen ------------------------------------
+- name: "net | MAC-Adressen zu Interfacenamen auflösen"
+  ansible.builtin.import_tasks: mac_resolve.yml
+
+# -- Phase 2: API-Auth ---------------------------------------------------------
 - name: "net | API-Ticket holen"
   ansible.builtin.uri:
     url:            "https://{{ pve_api_host }}:{{ pve_api_port }}/api2/json/access/ticket"
@@ -32,6 +44,7 @@
     _pve_csrf: "{{ _pve_ticket.json.data.CSRFPreventionToken }}"
   no_log: true
 
+# -- Phase 3: Bestehende Interfaces abfragen -----------------------------------
 - name: "net | Bestehende Interfaces abfragen"
   ansible.builtin.uri:
     url:            "https://{{ pve_api_host }}:{{ pve_api_port }}/api2/json/nodes/{{ inventory_hostname }}/network"
@@ -60,12 +73,17 @@
       iface:                 "{{ pve_bond0_name }}"
       type:                  "bond"
       autostart:             1
-      slaves:                "{{ pve_bond0_slaves | join(' ') }}"
+      slaves:                "{{ _resolved_bond0_slaves | join(' ') }}"
       bond_mode:             "{{ pve_bond0_mode }}"
       bond_xmit_hash_policy: "{{ pve_bond0_xmit_hash_policy }}"
       bond_lacp_rate:        "{{ pve_bond0_lacp_rate }}"
       bond_miimon:           "{{ pve_bond0_miimon }}"
-      comments:              "Management + Corosync Bond (LACP fast)"
+      comments:              >-
+        Management + Corosync Bond (LACP fast) –
+        {% for a in pve_nic_aliases | selectattr('role','equalto','bond0') %}
+        {{ a.alias }}={{ a.mac }}
+        {%- if not loop.last %}, {% endif %}
+        {% endfor %}
     status_code: [200, 201]
   when: pve_bond0_name not in _existing_ifaces
   register: _bond0
@@ -109,12 +127,17 @@
       iface:                 "{{ pve_bond1_name }}"
       type:                  "bond"
       autostart:             1
-      slaves:                "{{ pve_bond1_slaves | join(' ') }}"
+      slaves:                "{{ _resolved_bond1_slaves | join(' ') }}"
       bond_mode:             "{{ pve_bond1_mode }}"
       bond_xmit_hash_policy: "{{ pve_bond1_xmit_hash_policy }}"
       bond_lacp_rate:        "{{ pve_bond1_lacp_rate }}"
       bond_miimon:           "{{ pve_bond1_miimon }}"
-      comments:              "Storage Bond (LACP fast)"
+      comments:              >-
+        Storage Bond (LACP fast) –
+        {% for a in pve_nic_aliases | selectattr('role','equalto','bond1') %}
+        {{ a.alias }}={{ a.mac }}
+        {%- if not loop.last %}, {% endif %}
+        {% endfor %}
     status_code: [200, 201]
   when:
     - pve_bond1_enabled | bool
@@ -190,12 +213,17 @@
       iface:                 "{{ pve_bond2_name }}"
       type:                  "bond"
       autostart:             1
-      slaves:                "{{ pve_bond2_slaves | join(' ') }}"
+      slaves:                "{{ _resolved_bond2_slaves | join(' ') }}"
       bond_mode:             "{{ pve_bond2_mode }}"
       bond_xmit_hash_policy: "{{ pve_bond2_xmit_hash_policy }}"
       bond_lacp_rate:        "{{ pve_bond2_lacp_rate }}"
       bond_miimon:           "{{ pve_bond2_miimon }}"
-      comments:              "VM-Traffic Bond (LACP fast)"
+      comments:              >-
+        VM-Traffic Bond (LACP fast) –
+        {% for a in pve_nic_aliases | selectattr('role','equalto','bond2') %}
+        {{ a.alias }}={{ a.mac }}
+        {%- if not loop.last %}, {% endif %}
+        {% endfor %}
     status_code: [200, 201]
   when:
     - pve_bond2_enabled | bool
@@ -237,12 +265,12 @@
       CSRFPreventionToken: "{{ _pve_csrf }}"
     status_code: 200
   when: >
-    (_bond0 is defined and _bond0.changed | default(false)) or
-    (_vmbr0 is defined and _vmbr0.changed | default(false)) or
-    (_bond1 is defined and _bond1.changed | default(false)) or
-    (_storage_vlans is defined and _storage_vlans.changed | default(false)) or
+    (_bond0  is defined and _bond0.changed  | default(false)) or
+    (_vmbr0  is defined and _vmbr0.changed  | default(false)) or
+    (_bond1  is defined and _bond1.changed  | default(false)) or
+    (_storage_vlans   is defined and _storage_vlans.changed   | default(false)) or
     (_storage_bridges is defined and _storage_bridges.changed | default(false)) or
-    (_bond2 is defined and _bond2.changed | default(false)) or
+    (_bond2  is defined and _bond2.changed  | default(false)) or
     (_vmbrdata is defined and _vmbrdata.changed | default(false))
   register: _net_commit
 
@@ -250,7 +278,7 @@
   ansible.builtin.debug:
     msg:
       - "Netzwerk-Setup {{ inventory_hostname }}:"
-      - "  bond0  ({{ pve_bond0_slaves | join('+') }}) → {{ pve_mgmt_bridge }}  [LACP fast]"
-      - "  bond1  ({{ pve_bond1_slaves | default([]) | join('+') }}) → Storage-Bridges  [LACP fast]  enabled={{ pve_bond1_enabled }}"
-      - "  bond2  ({{ pve_bond2_slaves | default([]) | join('+') }}) → {{ pve_data_bridge }}  [LACP fast]  enabled={{ pve_bond2_enabled }}"
+      - "  bond0  ({{ _resolved_bond0_slaves | join('+') }}) → {{ pve_mgmt_bridge }}  [LACP fast]"
+      - "  bond1  ({{ _resolved_bond1_slaves | join('+') }}) → Storage-Bridges  [LACP fast]  enabled={{ pve_bond1_enabled }}"
+      - "  bond2  ({{ _resolved_bond2_slaves | join('+') }}) → {{ pve_data_bridge }}  [LACP fast]  enabled={{ pve_bond2_enabled }}"
       - "  Commit: {{ _net_commit.changed | default(false) }}"

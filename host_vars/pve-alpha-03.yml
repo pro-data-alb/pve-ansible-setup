@@ -8,15 +8,30 @@ pve_node_cidr_prefix: "24"
 pve_node_gw:          "192.168.10.1"
 pve_node_dns:         "192.168.10.1"
 pve_cluster_link1_ip: ""
+pve_cluster_primary:  false
 
-pve_bond0_slaves:
-  - "eno1"
-  - "eno2"
+pve_nic_aliases:
+  - mac:   "aa:bb:cc:03:01:01"
+    alias: "alpha03-mgmt-a"
+    role:  "bond0"
+  - mac:   "aa:bb:cc:03:01:02"
+    alias: "alpha03-mgmt-b"
+    role:  "bond0"
+  - mac:   "aa:bb:cc:03:02:01"
+    alias: "alpha03-stor-a"
+    role:  "bond1"
+  - mac:   "aa:bb:cc:03:02:02"
+    alias: "alpha03-stor-b"
+    role:  "bond1"
+  - mac:   "aa:bb:cc:03:03:01"
+    alias: "alpha03-vm-a"
+    role:  "bond2"
+  - mac:   "aa:bb:cc:03:03:02"
+    alias: "alpha03-vm-b"
+    role:  "bond2"
 
 pve_bond1_enabled: true
-pve_bond1_slaves:
-  - "ens1f0"
-  - "ens1f1"
+pve_bond2_enabled: true
 
 pve_storage_bridges:
   - iface:   "vmbr10"
@@ -34,8 +49,3 @@ pve_storage_bridges:
     address: "10.10.12.13"
     netmask: "24"
     comment: "iSCSI-2"
-
-pve_bond2_enabled: true
-pve_bond2_slaves:
-  - "ens2f0"
-  - "ens2f1"

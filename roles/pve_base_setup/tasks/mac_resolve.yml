@@ -1,0 +1,171 @@
+---
+# =============================================================================
+# mac_resolve.yml – MAC-Adressen zu Kernel-Interfacenamen auflösen
+#
+# Zweck:
+#   Im Vorfeld sind die physischen Interfacenamen (eno1, ens1f0, …) nicht
+#   bekannt – sie sind hardware- und treiberabhängig. Bekannt sind jedoch
+#   die MAC-Adressen (z. B. aus IPMI / Switch-LLDP-Tabellen).
+#
+#   Dieser Task-File:
+#     1. Liest alle physischen NIC-Names des Nodes via ansible_facts
+#     2. Matched jede MAC aus pve_nic_aliases gegen die Facts
+#     3. Setzt _pve_resolved_nics[alias] = ifname als Host-Fact
+#     4. Baut _resolved_bond0/1/2_slaves aus den Aliases zusammen
+#     5. Schreibt persistente udev-Regeln damit der Alias-Name nach
+#        Reboots stabil bleibt (optional, steuerbar via pve_nic_udev_rules)
+#
+# Variablen (in host_vars/<node>.yml definieren):
+#
+#   pve_nic_aliases:            # Liste aller NICs des Nodes
+#     - mac:   "aa:bb:cc:dd:ee:01"
+#       alias: "pve-mgmt-a"     # frei wählbarer Alias (nur für Doku/udev)
+#       role:  "bond0"          # bond0 | bond1 | bond2
+#     - mac:   "aa:bb:cc:dd:ee:02"
+#       alias: "pve-mgmt-b"
+#       role:  "bond0"
+#     - mac:   "aa:bb:cc:dd:ee:03"
+#       alias: "pve-stor-a"
+#       role:  "bond1"
+#     ...
+#
+#   pve_nic_udev_rules: true    # udev-Regeln schreiben (default: true)
+# =============================================================================
+
+- name: "mac_resolve | Facts neu laden (NIC-Infos sicherstellen)"
+  ansible.builtin.setup:
+    gather_subset:
+      - "!all"
+      - "network"
+  when: ansible_interfaces is not defined
+
+- name: "mac_resolve | MAC→Ifname Mapping aus ansible_facts aufbauen"
+  ansible.builtin.set_fact:
+    _mac_to_ifname: >-
+      {{
+        dict(
+          ansible_interfaces
+          | map('extract', vars, ['ansible_' ~ item])
+          | map(attribute='macaddress', default='')
+          | zip(ansible_interfaces)
+          | selectattr(0, 'ne', '')
+          | list
+        )
+      }}
+  vars:
+    item: ""
+  # Alternativer Weg: /sys/class/net direkt lesen (robuster bei VMs/Bonds)
+
+# Robusterer Ansatz: direkt /sys/class/net/<iface>/address lesen
+- name: "mac_resolve | Alle physischen Interfaces und MACs einlesen"
+  ansible.builtin.find:
+    paths: /sys/class/net
+    file_type: any
+    recurse:   false
+  register: _netdir_entries
+
+- name: "mac_resolve | MAC-Adressen pro Interface lesen"
+  ansible.builtin.slurp:
+    src: "/sys/class/net/{{ item.path | basename }}/address"
+  loop:         "{{ _netdir_entries.files }}"
+  loop_control:
+    label: "{{ item.path | basename }}"
+  register: _iface_macs_raw
+  ignore_errors: true   # virtuelle Interfaces (lo, tunX) haben keine address-Datei
+
+- name: "mac_resolve | Physikalische MAC→Ifname-Tabelle aufbauen"
+  ansible.builtin.set_fact:
+    _sys_mac_to_ifname: >-
+      {{
+        _sys_mac_to_ifname | default({}) | combine(
+          { (item.content | b64decode | trim | lower): (item.item.path | basename) }
+        )
+      }}
+  loop: "{{ _iface_macs_raw.results }}"
+  loop_control:
+    label: "{{ item.item.path | basename }}"
+  when:
+    - item.content is defined
+    - (item.content | b64decode | trim) != '00:00:00:00:00:00'
+    - (item.content | b64decode | trim) != ''
+
+- name: "mac_resolve | pve_nic_aliases gegen Tabelle auflösen"
+  ansible.builtin.set_fact:
+    _pve_resolved_nics: >-
+      {{
+        _pve_resolved_nics | default({}) | combine(
+          {
+            item.alias: {
+              'ifname': _sys_mac_to_ifname.get(item.mac | lower, '__NOT_FOUND__'),
+              'mac':    item.mac | lower,
+              'role':   item.role,
+              'alias':  item.alias
+            }
+          }
+        )
+      }}
+  loop: "{{ pve_nic_aliases }}"
+  loop_control:
+    label: "{{ item.alias }} ({{ item.mac }})"
+
+- name: "mac_resolve | Fehler bei nicht gefundenen MACs"
+  ansible.builtin.fail:
+    msg: >
+      NIC '{{ item.key }}' (MAC: {{ item.value.mac }}) wurde auf
+      {{ inventory_hostname }} nicht gefunden!
+      Verfügbare MACs: {{ _sys_mac_to_ifname.keys() | list | sort }}
+  loop: "{{ _pve_resolved_nics | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+  when: item.value.ifname == '__NOT_FOUND__'
+
+- name: "mac_resolve | Resolved slave-Listen pro Bond setzen"
+  ansible.builtin.set_fact:
+    _resolved_bond0_slaves: >-
+      {{
+        pve_nic_aliases
+        | selectattr('role', 'equalto', 'bond0')
+        | map(attribute='alias')
+        | map('extract', _pve_resolved_nics, 'ifname')
+        | list
+      }}
+    _resolved_bond1_slaves: >-
+      {{
+        pve_nic_aliases
+        | selectattr('role', 'equalto', 'bond1')
+        | map(attribute='alias')
+        | map('extract', _pve_resolved_nics, 'ifname')
+        | list
+      }}
+    _resolved_bond2_slaves: >-
+      {{
+        pve_nic_aliases
+        | selectattr('role', 'equalto', 'bond2')
+        | map(attribute='alias')
+        | map('extract', _pve_resolved_nics, 'ifname')
+        | list
+      }}
+
+- name: "mac_resolve | Auflösung anzeigen"
+  ansible.builtin.debug:
+    msg:
+      - "NIC-Auflösung für {{ inventory_hostname }}:"
+      - "{% for alias, data in _pve_resolved_nics.items() %}"
+      - "  {{ alias }} ({{ data.mac }}) → {{ data.ifname }}  [{{ data.role }}]"
+      - "{% endfor %}"
+      - "bond0 slaves: {{ _resolved_bond0_slaves }}"
+      - "bond1 slaves: {{ _resolved_bond1_slaves }}"
+      - "bond2 slaves: {{ _resolved_bond2_slaves }}"
+
+# -- udev-Regeln schreiben (persistente Umbenennung nach Alias) ---------------
+- name: "mac_resolve | udev-Regeln für stabile NIC-Namen schreiben"
+  ansible.builtin.template:
+    src:   "70-pve-nic-aliases.rules.j2"
+    dest:  "/etc/udev/rules.d/70-pve-nic-aliases.rules"
+    owner: root
+    group: root
+    mode:  "0644"
+  when: pve_nic_udev_rules | default(true) | bool
+  notify: udev reload
+  vars:
+    _resolved: "{{ _pve_resolved_nics }}"

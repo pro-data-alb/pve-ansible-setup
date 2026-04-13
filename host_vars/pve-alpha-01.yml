@@ -1,6 +1,18 @@
 ---
 # =============================================================================
-# host_vars – pve-alpha-01
+# host_vars – pve-alpha-01  (Primary Node)
+#
+# NIC-Identifizierung via MAC-Adressen:
+#   Interfacenamen (eno1, ens1f0, …) sind hardware-/treiberabhängig und
+#   im Vorfeld nicht zuverlässig bekannt.
+#   → MACs aus IPMI / Switch-LLDP-Tabelle hier eintragen.
+#   → mac_resolve.yml löst MACs → Kernel-Interfacenamen auf.
+#   → Alias wird in Bond-Comments und udev-Regeln verwendet.
+#
+# Auslesen der MACs vorab (auf dem Node):
+#   ip link show          (zeigt MAC je Interface)
+#   lldpcli show neighbors  (zeigt Switch-Port + MAC)
+#   ipmitool raw 0x0c 0x02 0x01 0x05 0x00 0x00  (IPMI LAN MAC)
 # =============================================================================
 
 # -- Management / Corosync ----------------------------------------------------
@@ -11,18 +23,48 @@ pve_node_dns:         "192.168.10.1"
 
 # Optionaler zweiter Corosync-Link (z. B. dediziertes Crossover-Netz)
 pve_cluster_link1_ip: ""
+pve_cluster_primary:  true
 
-# -- bond0 – Management-Bond (vmbr0 / Corosync) -------------------------------
-pve_bond0_slaves:
-  - "eno1"
-  - "eno2"
+# =============================================================================
+# NIC-Aliase: MAC-Adresse → Alias + Bond-Zuordnung
+#
+# role: bond0 = Management/Corosync
+#       bond1 = Storage (NFS/iSCSI)
+#       bond2 = VM-Traffic (SDN VLAN-aware)
+#
+# WICHTIG: pve_bond1_enabled / pve_bond2_enabled muss auf true gesetzt
+#          werden damit die Slaves auch verwendet werden.
+# =============================================================================
+pve_nic_aliases:
+  # bond0 – Management + Corosync (vmbr0)
+  - mac:   "aa:bb:cc:01:01:01"
+    alias: "alpha01-mgmt-a"
+    role:  "bond0"
+  - mac:   "aa:bb:cc:01:01:02"
+    alias: "alpha01-mgmt-b"
+    role:  "bond0"
 
-# -- bond1 – Storage-Bond (NFS / iSCSI via VLANs) -----------------------------
+  # bond1 – Storage (NFS / iSCSI)
+  - mac:   "aa:bb:cc:01:02:01"
+    alias: "alpha01-stor-a"
+    role:  "bond1"
+  - mac:   "aa:bb:cc:01:02:02"
+    alias: "alpha01-stor-b"
+    role:  "bond1"
+
+  # bond2 – VM-Traffic / SDN
+  - mac:   "aa:bb:cc:01:03:01"
+    alias: "alpha01-vm-a"
+    role:  "bond2"
+  - mac:   "aa:bb:cc:01:03:02"
+    alias: "alpha01-vm-b"
+    role:  "bond2"
+
+# -- Bond-Enable-Flags --------------------------------------------------------
 pve_bond1_enabled: true
-pve_bond1_slaves:
-  - "ens1f0"
-  - "ens1f1"
+pve_bond2_enabled: true
 
+# -- Storage-Bridges (VLAN-basiert auf bond1) ---------------------------------
 pve_storage_bridges:
   - iface:   "vmbr10"
     vlan_id: 10
@@ -40,11 +82,5 @@ pve_storage_bridges:
     netmask: "24"
     comment: "iSCSI-2"
 
-# -- bond2 – VM-Traffic-Bond (vmbrData / SDN VLAN-aware) ----------------------
-pve_bond2_enabled: true
-pve_bond2_slaves:
-  - "ens2f0"
-  - "ens2f1"
-
-# Disk-Setup (Node-spezifisch überschreiben falls nötig)
+# -- Disk-Setup (Node-spezifisch überschreiben falls nötig) -------------------
 # pve_disk_list: ["sda", "sdb"]

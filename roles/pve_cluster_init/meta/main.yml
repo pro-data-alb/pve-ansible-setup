@@ -1,0 +1,26 @@
+---
+galaxy_info:
+  role_name:        pve_cluster_init
+  author:           pro-data-alb
+  description:      >-
+    Proxmox VE 9 Cluster-Init: pvecm create auf Primary,
+    SSH-Key-basiertes pvecm add auf Secondary Nodes (kein expect,
+    kein Passwort-Prompt). Idempotent, unterstuetzt optionalen zweiten
+    Corosync-Link.
+  license:          MIT
+  min_ansible_version: "2.15"
+  platforms:
+    - name: Debian
+      versions:
+        - trixie
+  galaxy_tags:
+    - proxmox
+    - pve
+    - cluster
+    - corosync
+    - ha
+    - infrastructure
+
+dependencies:
+  - role: ansible.posix
+    # benoetigt fuer ansible.posix.authorized_key (SSH-Key-Austausch)
