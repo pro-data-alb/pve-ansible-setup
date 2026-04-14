@@ -1,4 +1,45 @@
 ---
+# =============================================================================
+# pve_iso_builder – defaults/main.yml
+#
+# WICHTIG: Diese Defaults sind Fallbacks.
+# Alle node-spezifischen Vars MÜSSEN vom Playbook-Loop via hostvars[item]
+# übergeben und per set_fact (tasks/main.yml) auf iso_builder gesetzt werden.
+# Fehlt ein Wert hier → Ansible wirft einen undefined-Fehler beim set_fact.
+# =============================================================================
+
+# -- ISO-Steuerung ------------------------------------------------------------
 pve_iso_download:        true
 pve_iso_validate_answer: true
 pve_answer_fetch_from:   "iso"   # iso | partition | http
+
+# -- Node-Identität (werden vom Loop überschrieben) ---------------------------
+_node_name:              "undefined-node"
+_node_fqdn:              "undefined-node.example.com"
+
+# -- Netzwerk -----------------------------------------------------------------
+# PFLICHT: Leere Strings → firstboot.sh bricht mit fail() ab
+pve_node_ip:             ""
+pve_node_cidr_prefix:    "24"
+pve_node_gw:             ""
+pve_node_dns:            ""
+
+# pve_nic_aliases: KEINE leere Liste als Default!
+# Eine leere Liste würde den bond0-Guard in firstboot.sh.j2 auslösen
+# und den ISO-Build mit FATAL abbrechen – gewolltes Verhalten.
+# → Muss zwingend in host_vars/<node>.yml definiert sein.
+pve_nic_aliases:         []
+
+# -- Optionale Bond-Flags -----------------------------------------------------
+pve_bond1_enabled:       false
+pve_bond2_enabled:       false
+pve_bond0_mtu:           1500
+
+# -- Storage-Bridges ----------------------------------------------------------
+pve_storage_bridges:     []
+
+# -- Corosync -----------------------------------------------------------------
+pve_cluster_link1_ip:    ""
+
+# -- Disk ---------------------------------------------------------------------
+pve_disk_list:           []
