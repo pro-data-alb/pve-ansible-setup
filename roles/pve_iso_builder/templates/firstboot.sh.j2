@@ -143,11 +143,22 @@ PVEUI="/usr/share/javascript/proxmox-widget-toolkit/proxmoxlib.js"
 #   f) DHCP-Interface deaktivieren
 #
 # Konfigurierte bond0-MACs (aus host_vars/<node>.yml – pve_nic_aliases[role=bond0]):
-{% for nic in pve_nic_aliases | selectattr('role', 'equalto', 'bond0') %}
+{% set bond0_nics = pve_nic_aliases | selectattr('role', 'equalto', 'bond0') | list %}
+{% if bond0_nics | length == 0 %}
+# GUARD: Kein bond0-Eintrag in pve_nic_aliases – Build wird mit fail() abbrechen!
+{% else %}
+{% for nic in bond0_nics %}
 #   {{ nic.alias }}: {{ nic.mac }}
 {% endfor %}
+{% endif %}
 # =============================================================================
 log "Phase 4: Management-Bond bond0 + vmbr0 aufbauen"
+
+# Guard: sicherstellen dass bond0-MACs vorhanden sind
+{% set bond0_nics = pve_nic_aliases | selectattr('role', 'equalto', 'bond0') | list %}
+{% if bond0_nics | length == 0 %}
+fail "FATAL: pve_nic_aliases enthält keine bond0-Einträge für {{ _node_name }}! ISO-Build abgebrochen."
+{% endif %}
 
 # -- 4a: MAC -> Interfacename Lookup ------------------------------------------
 declare -A MAC_TO_IFACE=()
@@ -171,7 +182,7 @@ done
 BOND0_SLAVES=()
 BOND0_ALIASES=()
 
-{% for nic in pve_nic_aliases | selectattr('role', 'equalto', 'bond0') %}
+{% for nic in bond0_nics %}
 # {{ nic.alias }} ({{ nic.mac }})
 MAC_LOWER_{{ loop.index }}=$(echo "{{ nic.mac }}" | tr '[:upper:]' '[:lower:]')
 if [[ -n "${MAC_TO_IFACE[$MAC_LOWER_{{ loop.index }}]:-}" ]]; then
@@ -205,7 +216,7 @@ cat > "$UDEV_RULES_FILE" <<'UDEV_HEADER'
 # =============================================================================
 UDEV_HEADER
 
-{% for nic in pve_nic_aliases | selectattr('role', 'equalto', 'bond0') %}
+{% for nic in bond0_nics %}
 MAC_FOR_UDEV_{{ loop.index }}=$(echo "{{ nic.mac }}" | tr '[:upper:]' '[:lower:]')
 CURRENT_IFACE_{{ loop.index }}="${MAC_TO_IFACE[$MAC_FOR_UDEV_{{ loop.index }}]:-}"
 if [[ -n "$CURRENT_IFACE_{{ loop.index }}" ]]; then
@@ -236,16 +247,16 @@ cat > /etc/network/interfaces.d/bond0-vmbr0 <<NETCFG
 # bond0 - Management + Corosync (LACP fast)
 # Generiert durch PVE firstboot.sh
 # bond0-Slaves (MAC-basiert):
-{% for nic in pve_nic_aliases | selectattr('role', 'equalto', 'bond0') %}
+{% for nic in bond0_nics %}
 # {{ nic.alias }}: {{ nic.mac }}
 {% endfor %}
 # =============================================================================
 
 # Slave-Interfaces (keine IP, nur "manual")
-$(for slave in "${BOND0_SLAVES[@]}"; do
+\$(for slave in "\${BOND0_SLAVES[@]}"; do
     cat <<EOF
-auto $slave
-iface $slave inet manual
+auto \$slave
+iface \$slave inet manual
     bond-master bond0
 
 EOF
@@ -253,7 +264,7 @@ done)
 # bond0 - LACP 802.3ad, fast rate (PFLICHT fuer Corosync!)
 auto bond0
 iface bond0 inet manual
-    bond-slaves     ${BOND0_SLAVES[*]}
+    bond-slaves     \${BOND0_SLAVES[*]}
     bond-mode       802.3ad
     bond-xmit-hash-policy layer3+4
     bond-lacp-rate  fast
@@ -278,7 +289,6 @@ log "Netzwerkkonfiguration geschrieben"
 # -- 4e: DHCP-Interface aus der Haupt-interfaces-Datei auskommentieren --------
 if [[ -n "${DHCP_IFACE:-}" ]]; then
     log "DHCP-Interface '${DHCP_IFACE}' in /etc/network/interfaces deaktivieren"
-    # auto-Zeile und iface-Zeile auskommentieren
     sed -i "/^auto ${DHCP_IFACE}$/s/^/# /" /etc/network/interfaces
     sed -i "/^iface ${DHCP_IFACE} inet dhcp/s/^/# /" /etc/network/interfaces
 fi
@@ -286,13 +296,11 @@ fi
 # -- 4f: Bond + Bridge hochbringen -------------------------------------------
 log "bond0-Slaves in promisc-Mode setzen"
 for slave in "${BOND0_SLAVES[@]}"; do
-    # Vorherige IP/Link-Konfiguration vom DHCP entfernen
     ip addr flush dev "$slave" 2>/dev/null || true
     ip link set "$slave" down 2>/dev/null || true
 done
 
 log "bond0 und vmbr0 hochbringen (ifup)"
-# ifup ist von ifupdown2 (Proxmox-Standard) - unterstuetzt Bonds nativ
 ifup bond0    || fail "ifup bond0 fehlgeschlagen"
 ifup vmbr0    || fail "ifup vmbr0 fehlgeschlagen"
 
