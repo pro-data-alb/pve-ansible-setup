@@ -1,9 +1,18 @@
----
 # =============================================================================
 # Playbook 1 – Proxmox VE 9 Unattended ISO erzeugen
 # Ausführen: ansible-playbook 01_build_iso.yml
+#
+# Läuft auf dem iso_builder-Host.
+# Baut für JEDE Node in groups['proxmox_nodes'] eine eigene ISO:
+#   proxmox-ve_<node>.iso  mit node-spezifischem FQDN + MACs
+#
+# Var-Scope-Strategie:
+#   include_role vars: übergibt Vars nur auf Prio-Level 18 (Task-Vars).
+#   ansible.builtin.template rendert im Host-Kontext von iso_builder.
+#   Daher: tasks/main.yml schreibt alle Vars per set_fact als Host-Facts
+#   (Prio 22) – das ist der eigentliche Fix für fehlende MACs im Script.
 # =============================================================================
-- name: Proxmox VE Unattended ISO erzeugen
+- name: Proxmox VE Unattended ISOs erzeugen (eine pro Node)
   hosts: iso_builder
   gather_facts: true
 
@@ -23,14 +32,65 @@
           - pve_root_ssh_keys | length > 0
         fail_msg: "pve_root_ssh_keys enthält keinen SSH Public Key!"
 
-  roles:
-    - role: pve_iso_builder
+  tasks:
+    - name: "iso | Build-Abhängigkeiten installieren"
+      ansible.builtin.apt:
+        name:
+          - proxmox-auto-install-assistant
+          - wget
+          - whois
+        state: present
+        update_cache: true
+      become: true
+      when: ansible_os_family == "Debian"
+
+    - name: "iso | Pro Node – answer.toml + firstboot.sh + ISO erzeugen"
+      ansible.builtin.include_role:
+        name: pve_iso_builder
+      vars:
+        # ── Identität ─────────────────────────────────────────────────────────────────────
+        _node_name:              "{{ _pve_node_item }}"
+        _node_fqdn:              "{{ _pve_node_item }}.{{ hostvars[_pve_node_item]['pve_domain'] }}"
+        pve_iso_output_filename: "proxmox-ve_{{ _pve_node_item }}.iso"
+
+        # ── Netzwerk (PFLICHT – aus host_vars/) ────────────────────────────────────────
+        # pve_nic_aliases: KERNFIX – übergibt die MAC-Liste explizit.
+        # Ohne diese Zeile rendert firstboot.sh.j2 keine bond0-MACs,
+        # da iso_builder diese Var nicht in host_vars hat.
+        pve_nic_aliases:         "{{ hostvars[_pve_node_item]['pve_nic_aliases'] }}"
+        pve_node_ip:             "{{ hostvars[_pve_node_item]['pve_node_ip'] }}"
+        pve_node_cidr_prefix:    "{{ hostvars[_pve_node_item]['pve_node_cidr_prefix'] }}"
+        pve_node_gw:             "{{ hostvars[_pve_node_item]['pve_node_gw'] }}"
+        pve_node_dns:            "{{ hostvars[_pve_node_item]['pve_node_dns'] }}"
+
+        # ── Disk (node-spezifisch, mit sicherem Default) ─────────────────────────────
+        pve_disk_list:           "{{ hostvars[_pve_node_item].get('pve_disk_list', []) }}"
+
+        # ── Storage-Bridges / Bonds (optional) ───────────────────────────────────
+        pve_storage_bridges:     "{{ hostvars[_pve_node_item].get('pve_storage_bridges', []) }}"
+        pve_bond1_enabled:       "{{ hostvars[_pve_node_item].get('pve_bond1_enabled', false) }}"
+        pve_bond2_enabled:       "{{ hostvars[_pve_node_item].get('pve_bond2_enabled', false) }}"
+
+        # ── Corosync Link1 (optional) ──────────────────────────────────────────────
+        pve_cluster_link1_ip:    "{{ hostvars[_pve_node_item].get('pve_cluster_link1_ip', '') }}"
+
+      loop: "{{ groups['proxmox_nodes'] | flatten | select('in', hostvars) | list }}"
+      loop_control:
+        loop_var: _pve_node_item
+        label: "{{ _pve_node_item }} → proxmox-ve_{{ _pve_node_item }}.iso"
 
   post_tasks:
     - name: Zusammenfassung
       ansible.builtin.debug:
-        msg:
-          - "✅ Unattended ISO fertig:"
-          - "   {{ pve_iso_output_dir }}/{{ pve_iso_output_filename }}"
-          - "➡  Nächster Schritt: ISO auf USB/IPMI laden, Node booten,"
-          - "   dann ansible-playbook 02_base_setup.yml ausführen."
+        msg: >-
+          ✅ Unattended ISOs fertig in {{ pve_iso_output_dir }}:
+          {% for node in groups['proxmox_nodes'] | flatten %}
+            - proxmox-ve_{{ node }}.iso
+              FQDN  : {{ node }}.{{ hostvars[node]['pve_domain'] }}
+              Mgmt  : {{ hostvars[node]['pve_node_ip'] }}/{{ hostvars[node]['pve_node_cidr_prefix'] }}
+              bond0 : {{ hostvars[node]['pve_nic_aliases']
+                         | selectattr('role', 'equalto', 'bond0')
+                         | map(attribute='mac') | list | join(', ') }}
+          {% endfor %}
+          ➡  Nächster Schritt: ISOs auf USB/IPMI laden, Nodes booten,
+             dann ansible-playbook 02_base_setup.yml ausführen.

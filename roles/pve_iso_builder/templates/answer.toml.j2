@@ -26,9 +26,9 @@ country              = "{{ pve_country }}"
 timezone             = "{{ pve_timezone }}"
 mailto               = "{{ pve_mailto }}"
 root-password-hashed = "{{ pve_root_password_hashed }}"
-# FIX Step 5: fqdn-Angaben aus ungültigem [global.fqdn]-Block hierher verschoben.
-# [global.fqdn] ist kein gültiger PVE-9-Answer-File-Schlüssel.
-fqdn                 = "{{ inventory_hostname }}.{{ pve_domain }}"
+# FIX: _node_fqdn wird vom Playbook-Loop übergeben (war: inventory_hostname)
+# Ergebnis: pd-proxmox04.pro-data.cloud statt iso_builder.domain
+fqdn                 = "{{ _node_fqdn }}"
 reboot-on-error      = {{ pve_reboot_on_error | lower }}
 reboot-mode          = "{{ pve_reboot_mode | default('reboot') }}"
 
@@ -41,7 +41,6 @@ root-ssh-keys = [
 {% endif %}
 
 # Stufe 1: from-dhcp – firstboot.sh baut danach bond0/vmbr0 auf
-# Stufe 2 (bond0/vmbr0) wird durch firstboot.sh erledigt
 [network]
 source = "from-dhcp"
 

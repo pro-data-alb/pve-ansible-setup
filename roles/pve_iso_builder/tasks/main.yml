@@ -1,85 +1,153 @@
----
-- name: "iso | Build-Abhängigkeiten installieren"
-  ansible.builtin.apt:
-    name:
-      - proxmox-auto-install-assistant
-      - wget
-      - whois
-    state: present
-    update_cache: true
-  become: true
-  when: ansible_os_family == "Debian"
+# =============================================================================
+# pve_iso_builder – tasks/main.yml
+# =============================================================================
 
+# ---------------------------------------------------------------------------
+# STEP 1: Vars aus include_role vars: (Prio 18) als Host-Facts (Prio 22)
+#         auf iso_builder fixieren – VOR Guard und VOR Template-Rendering!
+#
+#         cacheable: false via args: übergeben – das ist die einzig korrekte
+#         Syntax um set_fact-Modul-Parameter neben den gesetzten Vars zu nutzen:
+#
+#           ansible.builtin.set_fact:
+#             myvar: myval
+#           args:
+#             cacheable: false
+# ---------------------------------------------------------------------------
+- name: "iso | set_fact: node-Vars als Host-Facts auf iso_builder fixieren"
+  ansible.builtin.set_fact:
+    _node_name:              "{{ _node_name }}"
+    _node_fqdn:              "{{ _node_fqdn }}"
+    pve_node_ip:             "{{ pve_node_ip }}"
+    pve_node_cidr_prefix:    "{{ pve_node_cidr_prefix }}"
+    pve_node_gw:             "{{ pve_node_gw }}"
+    pve_node_dns:            "{{ pve_node_dns }}"
+    pve_nic_aliases:         "{{ pve_nic_aliases }}"
+    pve_bond0_mtu:           "{{ pve_bond0_mtu }}"
+    pve_bond1_enabled:       "{{ pve_bond1_enabled }}"
+    pve_bond2_enabled:       "{{ pve_bond2_enabled }}"
+    pve_storage_bridges:     "{{ pve_storage_bridges }}"
+    pve_cluster_link1_ip:    "{{ pve_cluster_link1_ip }}"
+    pve_disk_list:           "{{ pve_disk_list }}"
+    pve_iso_output_filename: "{{ pve_iso_output_filename }}"
+  args:
+    cacheable: false
+
+# ---------------------------------------------------------------------------
+# STEP 2: Guard
+# ---------------------------------------------------------------------------
+- name: "iso | Guard: Pflicht-Vars vollständig und bond0-MACs vorhanden?"
+  ansible.builtin.assert:
+    that:
+      - pve_nic_aliases | length > 0
+      - pve_node_ip     | length > 0
+      - pve_node_gw     | length > 0
+      - (pve_nic_aliases | selectattr('role', 'equalto', 'bond0') | list | length) > 0
+    fail_msg: >-
+      [{{ _node_name }}] pve_nic_aliases / pve_node_ip / pve_node_gw fehlen
+      oder pve_nic_aliases enthält keine Einträge mit role=bond0!
+      Prüfe host_vars/{{ _node_name }}.yml
+
+# ---------------------------------------------------------------------------
+# STEP 3: Debug-Ausgabe
+# ---------------------------------------------------------------------------
+- name: "iso | Debug: bond0-MACs für {{ _node_name }}"
+  ansible.builtin.debug:
+    msg: >-
+      [{{ _node_name }}] bond0-MACs ins firstboot.sh:
+      {{ pve_nic_aliases
+         | selectattr('role', 'equalto', 'bond0')
+         | map(attribute='mac') | list | join(', ') }}
+
+# ---------------------------------------------------------------------------
+# Arbeitsverzeichnis
+# ---------------------------------------------------------------------------
 - name: "iso | Arbeitsverzeichnis anlegen"
   ansible.builtin.file:
     path:  "{{ pve_iso_output_dir }}"
     state: directory
     mode:  "0755"
 
-- name: "iso | Quell-ISO herunterladen"
-  ansible.builtin.get_url:
-    url:  "{{ pve_iso_url }}"
-    dest: "{{ pve_iso_output_dir }}/{{ pve_iso_filename }}"
-    mode: "0644"
-  when: pve_iso_download | bool
-
-- name: "iso | Quell-ISO prüfen"
+# ---------------------------------------------------------------------------
+# Quell-ISO – idempotenter Download
+# ---------------------------------------------------------------------------
+- name: "iso | Quell-ISO: existiert sie bereits?"
   ansible.builtin.stat:
     path: "{{ pve_iso_output_dir }}/{{ pve_iso_filename }}"
-  register: _iso_stat
+    get_checksum: false
+  register: _src_iso_stat
 
-- name: "iso | Fehler wenn ISO fehlt"
+- name: "iso | Quell-ISO herunterladen (nur wenn nicht vorhanden)"
+  ansible.builtin.get_url:
+    url:      "{{ pve_iso_url }}"
+    dest:     "{{ pve_iso_output_dir }}/{{ pve_iso_filename }}"
+    mode:     "0644"
+    tmp_dest: "{{ pve_iso_output_dir }}"
+  when:
+    - pve_iso_download | bool
+    - not _src_iso_stat.stat.exists
+
+- name: "iso | Fehler wenn Quell-ISO fehlt und Download deaktiviert"
   ansible.builtin.fail:
-    msg: "Quell-ISO nicht gefunden: {{ pve_iso_output_dir }}/{{ pve_iso_filename }}"
-  when: not _iso_stat.stat.exists
+    msg: >-
+      Quell-ISO nicht gefunden: {{ pve_iso_output_dir }}/{{ pve_iso_filename }}
+      Setze pve_iso_download: true oder lege die ISO manuell ab.
+  when:
+    - not _src_iso_stat.stat.exists
+    - not (pve_iso_download | bool)
 
-- name: "iso | answer.toml aus Template erzeugen"
+# ---------------------------------------------------------------------------
+# Templates rendern
+# ---------------------------------------------------------------------------
+- name: "iso | answer.toml erzeugen ({{ _node_fqdn }})"
   ansible.builtin.template:
     src:  answer.toml.j2
-    dest: "{{ pve_iso_output_dir }}/answer.toml"
+    dest: "{{ pve_iso_output_dir }}/answer_{{ _node_name }}.toml"
     mode: "0640"
   register: _answer_changed
 
-- name: "iso | firstboot.sh aus Template erzeugen"
+- name: "iso | firstboot.sh erzeugen ({{ _node_name }})"
   ansible.builtin.template:
     src:  firstboot.sh.j2
-    dest: "{{ pve_iso_output_dir }}/firstboot.sh"
+    dest: "{{ pve_iso_output_dir }}/firstboot_{{ _node_name }}.sh"
     mode: "0750"
   register: _firstboot_changed
 
+# ---------------------------------------------------------------------------
+# Validierung + ISO-Build
+# ---------------------------------------------------------------------------
 - name: "iso | answer.toml validieren"
   ansible.builtin.command:
     cmd: >-
       proxmox-auto-install-assistant validate-answer
-      {{ pve_iso_output_dir }}/answer.toml
+      {{ pve_iso_output_dir }}/answer_{{ _node_name }}.toml
   register: _validate_result
   changed_when: false
   when: pve_iso_validate_answer | bool
 
-# FIX Step 4: Output-ISO-Status prüfen (nötig für Rebuild-Logik)
 - name: "iso | Output-ISO: Status prüfen"
   ansible.builtin.stat:
     path: "{{ pve_iso_output_dir }}/{{ pve_iso_output_filename }}"
+    get_checksum: false
   register: _iso_out_stat
 
-# FIX Step 4: Output-ISO entfernen wenn Inputs geändert haben
-# Vorher: "creates:" verhinderte Neubau auch nach Template-Änderung!
 - name: "iso | Output-ISO entfernen wenn Inputs geändert"
   ansible.builtin.file:
     path:  "{{ pve_iso_output_dir }}/{{ pve_iso_output_filename }}"
     state: absent
   when: _answer_changed.changed or _firstboot_changed.changed
 
-# FIX Step 4: "creates:" entfernt – Rebuild wird durch when-Bedingung gesteuert.
-# ISO wird neu gebaut wenn: noch nicht vorhanden ODER answer.toml/firstboot.sh geändert.
-- name: "iso | Unattended ISO erzeugen"
+- name: "iso | Unattended ISO erzeugen ({{ _node_fqdn }})"
   ansible.builtin.command:
     cmd: >-
       proxmox-auto-install-assistant prepare-iso
       {{ pve_iso_output_dir }}/{{ pve_iso_filename }}
       --fetch-from {{ pve_answer_fetch_from }}
-      --answer-file {{ pve_iso_output_dir }}/answer.toml
-      --on-first-boot {{ pve_iso_output_dir }}/firstboot.sh
+      --answer-file {{ pve_iso_output_dir }}/answer_{{ _node_name }}.toml
+      --on-first-boot {{ pve_iso_output_dir }}/firstboot_{{ _node_name }}.sh
       --output {{ pve_iso_output_dir }}/{{ pve_iso_output_filename }}
-  when: not _iso_out_stat.stat.exists or _answer_changed.changed or _firstboot_changed.changed
+  when: >-
+    not _iso_out_stat.stat.exists
+    or _answer_changed.changed
+    or _firstboot_changed.changed
   changed_when: true
