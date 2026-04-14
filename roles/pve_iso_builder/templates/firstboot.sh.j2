@@ -9,19 +9,6 @@
 #   2. Basis-Pakete installieren (lldpd, ethtool, ...)
 #   3. System haerten (SSH, sysctl, Subscription-Popup)
 #   4. Management-Bond (bond0 + vmbr0) via MAC-Adressen aufbauen
-#      - MACs werden in host_vars/<node>.yml unter pve_nic_aliases[role=bond0]
-#        hinterlegt und hier via /sys/class/net aufgeloest
-#      - udev-Regeln fuer stabile Interfacenamen werden geschrieben
-#      - bond0 (LACP fast) + vmbr0 (Management-IP) werden gebaut
-#      - DHCP-Interface wird danach deaktiviert
-#      => Nach Reboot ist der Node per SSH auf pve_node_ip erreichbar
-#      => Ansible kann danach den Rest (bond1, bond2, Cluster, ...) uebernehmen
-#
-# HINWEIS:
-#   Der PVE-Installer benoetigt ein lauffaehiges Netzwerk-Interface.
-#   Daher wird im answer.toml 'source = "from-dhcp"' verwendet.
-#   Der Installer bringt genau eine NIC per DHCP hoch (erste erkannte).
-#   Dieser firstboot.sh-Hook baut danach den korrekten Bond auf.
 # =============================================================================
 set -euo pipefail
 exec > >(tee -a /var/log/pve-firstboot.log) 2>&1
@@ -29,15 +16,29 @@ exec > >(tee -a /var/log/pve-firstboot.log) 2>&1
 log()  { echo "[firstboot $(date '+%H:%M:%S')] $*"; }
 fail() { echo "[firstboot $(date '+%H:%M:%S')] FEHLER: $*" >&2; exit 1; }
 
-log "=== Start (ordering: ${1:-unknown}) ==="
+log "=== Start ==="
 
 {% raw %}
 wait_for_apt() {
-    local r=30
+    local retries=30
     while ! flock -n /var/lib/dpkg/lock-frontend -c true 2>/dev/null; do
-        (( r-- <= 0 )) && fail "APT-Lock Timeout nach 90s"
+        retries=$(( retries - 1 ))
+        [ "$retries" -le 0 ] && fail "APT-Lock Timeout nach 90s"
         sleep 3
     done
+}
+
+# Hilfsfunktion: MAC -> Interfacename (kein assoziatives Array noetig)
+mac_to_iface() {
+    local target_mac
+    target_mac=$(echo "$1" | tr '[:upper:]' '[:lower:]')
+    local iface_path iface mac
+    for iface_path in /sys/class/net/*/address; do
+        iface=$(basename "$(dirname "$iface_path")")
+        mac=$(cat "$iface_path" 2>/dev/null | tr '[:upper:]' '[:lower:]' || true)
+        [ "$mac" = "$target_mac" ] && echo "$iface" && return 0
+    done
+    return 1
 }
 {% endraw %}
 
@@ -50,14 +51,14 @@ for f in /etc/apt/sources.list.d/pve-enterprise.list \
           /etc/apt/sources.list.d/ceph.list; do
     [ -f "$f" ] && sed -i 's|^deb |# deb |g' "$f" && log "  deaktiviert: $f"
 done
-cat > /etc/apt/sources.list.d/pve-no-subscription.list <<'EOF'
+cat > /etc/apt/sources.list.d/pve-no-subscription.list <<'APTSRC'
 deb http://download.proxmox.com/debian/pve trixie pve-no-subscription
-EOF
-cat > /etc/apt/sources.list <<'EOF'
+APTSRC
+cat > /etc/apt/sources.list <<'APTSRC'
 deb http://deb.debian.org/debian trixie main contrib non-free-firmware
 deb http://deb.debian.org/debian trixie-updates main contrib non-free-firmware
 deb http://security.debian.org/debian-security trixie-security main contrib non-free-firmware
-EOF
+APTSRC
 {% endif %}
 
 # =============================================================================
@@ -68,7 +69,7 @@ wait_for_apt
 DEBIAN_FRONTEND=noninteractive apt-get update -qq
 DEBIAN_FRONTEND=noninteractive apt-get install -y \
     ifenslave \
-    ethtool  \
+    ethtool \
 {% for pkg in pve_extra_packages | default(['lldpd']) %}
     {{ pkg }}{% if not loop.last %} \{% endif %}
 
@@ -77,22 +78,22 @@ DEBIAN_FRONTEND=noninteractive apt-get install -y \
 {% if lldpd_configure | default(true) %}
 log "lldpd konfigurieren"
 mkdir -p /etc/lldpd.d
-cat > /etc/lldpd.d/00-proxmox.conf <<'EOF'
+cat > /etc/lldpd.d/00-proxmox.conf <<'LLDPCFG'
 configure lldp portidsubtype {{ lldpd_port_id_subtype | default('macaddress') }}
 configure system description "{{ lldpd_system_description | default('Proxmox VE Node') }}"
 configure system platform "Proxmox VE"
 configure lldp tx-interval 30
-EOF
+LLDPCFG
 systemctl enable --now lldpd
 {% endif %}
 
 {% if pve_ntp_servers is defined %}
 log "NTP konfigurieren"
-cat > /etc/systemd/timesyncd.conf <<'EOF'
+cat > /etc/systemd/timesyncd.conf <<'NTPCFG'
 [Time]
 NTP={{ pve_ntp_servers | join(' ') }}
 FallbackNTP=pool.ntp.org
-EOF
+NTPCFG
 systemctl restart systemd-timesyncd && timedatectl set-ntp true
 {% endif %}
 
@@ -100,189 +101,116 @@ systemctl restart systemd-timesyncd && timedatectl set-ntp true
 # Phase 3: System haerten
 # =============================================================================
 log "Phase 3: SSH haerten"
-{% raw %}
-declare -A SSH_OPTS=(
-  ["PermitRootLogin"]="JINJA_SSH_PERMIT_ROOT_LOGIN"
-  ["PasswordAuthentication"]="JINJA_SSH_PASSWORD_AUTH"
-  ["X11Forwarding"]="no"
-  ["MaxAuthTries"]="3"
-  ["LoginGraceTime"]="30"
-)
-for key in "${!SSH_OPTS[@]}"; do
-    val="${SSH_OPTS[$key]}"
-    if grep -qE "^#?${key}" /etc/ssh/sshd_config; then
-        sed -i "s|^#\?${key}.*|${key} ${val}|" /etc/ssh/sshd_config
-    else
-        echo "${key} ${val}" >> /etc/ssh/sshd_config
-    fi
-done
-{% endraw %}
-# Patch SSH-Optionen mit Jinja-Werten direkt per sed (raw-Block kann keine Jinja-Vars lesen)
-sed -i "s|JINJA_SSH_PERMIT_ROOT_LOGIN|{{ pve_ssh_permit_root_login | default('prohibit-password') }}|g" /etc/ssh/sshd_config
-sed -i "s|JINJA_SSH_PASSWORD_AUTH|{{ pve_ssh_password_auth | default('no') }}|g" /etc/ssh/sshd_config
+# Jinja setzt die Werte direkt – kein assoziatives Array noetig
+sed -i "s|^#\?PermitRootLogin.*|PermitRootLogin {{ pve_ssh_permit_root_login | default('prohibit-password') }}|" /etc/ssh/sshd_config \
+  || echo "PermitRootLogin {{ pve_ssh_permit_root_login | default('prohibit-password') }}" >> /etc/ssh/sshd_config
+sed -i "s|^#\?PasswordAuthentication.*|PasswordAuthentication {{ pve_ssh_password_auth | default('no') }}|" /etc/ssh/sshd_config \
+  || echo "PasswordAuthentication {{ pve_ssh_password_auth | default('no') }}" >> /etc/ssh/sshd_config
+grep -q '^X11Forwarding' /etc/ssh/sshd_config \
+  && sed -i 's|^#\?X11Forwarding.*|X11Forwarding no|' /etc/ssh/sshd_config \
+  || echo 'X11Forwarding no' >> /etc/ssh/sshd_config
+grep -q '^MaxAuthTries' /etc/ssh/sshd_config \
+  && sed -i 's|^#\?MaxAuthTries.*|MaxAuthTries 3|' /etc/ssh/sshd_config \
+  || echo 'MaxAuthTries 3' >> /etc/ssh/sshd_config
+grep -q '^LoginGraceTime' /etc/ssh/sshd_config \
+  && sed -i 's|^#\?LoginGraceTime.*|LoginGraceTime 30|' /etc/ssh/sshd_config \
+  || echo 'LoginGraceTime 30' >> /etc/ssh/sshd_config
 systemctl restart ssh
 
-cat > /etc/sysctl.d/99-pve.conf <<'EOF'
+cat > /etc/sysctl.d/99-pve.conf <<'SYSCTLCFG'
 net.ipv4.ip_forward = 1
 net.ipv6.conf.all.forwarding = 1
 net.ipv4.tcp_syncookies = 1
 kernel.kptr_restrict = 2
 kernel.dmesg_restrict = 1
-EOF
+SYSCTLCFG
 sysctl --system >/dev/null 2>&1
 
 {% if not pve_use_subscription %}
 log "Subscription-Warnung deaktivieren"
-{% raw %}
 PVEUI="/usr/share/javascript/proxmox-widget-toolkit/proxmoxlib.js"
-[ -f "$PVEUI" ] && cp "$PVEUI" "${PVEUI}.bak" && \
+[ -f "$PVEUI" ] && cp "${PVEUI}" "${PVEUI}.bak" && \
   sed -i "s/Ext.Msg.show({/void({/g" "$PVEUI" 2>/dev/null || true
-{% endraw %}
 {% endif %}
 
 # =============================================================================
 # Phase 4: Management-Bond (bond0 + vmbr0) via MAC-Adressen aufbauen
 #
-# Strategie:
-#   a) Alle NICs und deren MACs via /sys/class/net einlesen
-#   b) Konfigurierte bond0-MACs gegen die gelesenen MACs abgleichen
-#   c) udev-Regeln fuer stabile Interfacenamen schreiben
-#   d) /etc/network/interfaces.d/bond0-vmbr0 schreiben (LACP fast)
-#   e) bond0 + vmbr0 mit ifup hochbringen
-#   f) DHCP-Interface deaktivieren
-#
-# Konfigurierte bond0-MACs (aus host_vars/<node>.yml – pve_nic_aliases[role=bond0]):
+# bond0-MACs aus host_vars (pve_nic_aliases[role=bond0]):
 {% for nic in pve_nic_aliases | selectattr('role', 'equalto', 'bond0') %}
 #   {{ nic.alias }}: {{ nic.mac }}
 {% endfor %}
 # =============================================================================
 log "Phase 4: Management-Bond bond0 + vmbr0 aufbauen"
 
-# -- 4a: MAC -> Interfacename Lookup ------------------------------------------
-{% raw %}
-declare -A MAC_TO_IFACE=()
-
-for iface_path in /sys/class/net/*/address; do
-    iface=$(basename "$(dirname "$iface_path")")
-    mac=$(cat "$iface_path" 2>/dev/null | tr '[:upper:]' '[:lower:]' || true)
-    # Nur physische NICs beruecksichtigen (keine Loopback, keine Bonds, keine VMs)
-    [[ "$mac" == "00:00:00:00:00:00" ]] && continue
-    [[ "$mac" == "" ]]                   && continue
-    [[ "$iface" == "lo" ]]               && continue
-    MAC_TO_IFACE["$mac"]="$iface"
-done
-
-log "Gefundene physische Interfaces:"
-for mac in "${!MAC_TO_IFACE[@]}"; do
-    log "  ${MAC_TO_IFACE[$mac]} -> $mac"
-done
-{% endraw %}
-
-# -- 4b: Konfigurierte bond0-MACs auflösen ------------------------------------
+# -- 4a: bond0-MACs zu Interfacenamen aufloesen -------------------------------
+# Jinja generiert pro NIC eine Variable; keine assoziativen Arrays noetig.
 BOND0_SLAVES=()
-BOND0_ALIASES=()
 
 {% for nic in pve_nic_aliases | selectattr('role', 'equalto', 'bond0') %}
-# {{ nic.alias }} ({{ nic.mac }})
-{% raw %}
-MAC_LOWER_{% endraw %}{{ loop.index }}=$(echo "{{ nic.mac }}" | tr '[:upper:]' '[:lower:]')
-{% raw %}if [[ -n "${MAC_TO_IFACE[${% endraw %}MAC_LOWER_{{ loop.index }}{% raw %}]:-}" ]]; then
-    IFACE_{% endraw %}{{ loop.index }}{% raw %}="${MAC_TO_IFACE[${% endraw %}MAC_LOWER_{{ loop.index }}{% raw %}]}"
-    log "{% endraw %}  OK: {{ nic.alias }} ({{ nic.mac }}) -> {% raw %}$IFACE_{% endraw %}{{ loop.index }}{% raw %}"
-    BOND0_SLAVES+=("$IFACE_{% endraw %}{{ loop.index }}{% raw %}")
-    BOND0_ALIASES+=("{% endraw %}{{ nic.alias }}{% raw %}")
+IFACE_{{ loop.index }}=$(mac_to_iface "{{ nic.mac }}") || true
+if [ -n "$IFACE_{{ loop.index }}" ]; then
+    log "  OK: {{ nic.alias }} ({{ nic.mac }}) -> $IFACE_{{ loop.index }}"
+    BOND0_SLAVES=("${BOND0_SLAVES[@]}" "$IFACE_{{ loop.index }}")
 else
-    log "{% endraw %}  WARNUNG: MAC {{ nic.mac }} ({{ nic.alias }}) nicht gefunden!{% raw %}"
-    log "  Verfuegbare MACs: ${!MAC_TO_IFACE[*]}"
-    # Kein hartes fail hier - bei nur einer NIC vielleicht akzeptabel
-    # Aendern auf fail() wenn Bond zwingend benoetigt wird
+    log "  WARNUNG: MAC {{ nic.mac }} ({{ nic.alias }}) nicht gefunden!"
 fi
-{% endraw %}
 {% endfor %}
 
-# Mindestens eine Slave-NIC muss gefunden worden sein
-{% raw %}
-[[ ${#BOND0_SLAVES[@]} -lt 1 ]] && \
+[ "${#BOND0_SLAVES[@]}" -lt 1 ] && \
     fail "Keine bond0-NIC gefunden! Konfigurierte MACs nicht auf diesem System vorhanden."
-
 log "bond0 Slaves: ${BOND0_SLAVES[*]}"
-{% endraw %}
 
-# -- 4c: Persistente udev-Regeln fuer bond0-Slaves ----------------------------
+# -- 4b: Persistente udev-Regeln fuer bond0-Slaves ----------------------------
 log "udev-Regeln schreiben: /etc/udev/rules.d/70-pve-nic-aliases.rules"
 mkdir -p /etc/udev/rules.d
 UDEV_RULES_FILE="/etc/udev/rules.d/70-pve-nic-aliases.rules"
 cat > "$UDEV_RULES_FILE" <<'UDEV_HEADER'
-# =============================================================================
-# Autogeneriert durch PVE firstboot.sh - NICHT manuell bearbeiten!
-# Weist NICs stabile Kernel-Namen basierend auf MAC-Adressen zu.
-# Ansible (mac_resolve.yml) erweitert diese Datei spaeter um bond1/bond2.
-# =============================================================================
+# Autogeneriert durch PVE firstboot.sh – NICHT manuell bearbeiten!
 UDEV_HEADER
 
 {% for nic in pve_nic_aliases | selectattr('role', 'equalto', 'bond0') %}
-MAC_FOR_UDEV_{{ loop.index }}=$(echo "{{ nic.mac }}" | tr '[:upper:]' '[:lower:]')
-{% raw %}CURRENT_IFACE_{% endraw %}{{ loop.index }}{% raw %}="${MAC_TO_IFACE[${% endraw %}MAC_FOR_UDEV_{{ loop.index }}{% raw %}]:-}"
-if [[ -n "$CURRENT_IFACE_{% endraw %}{{ loop.index }}{% raw %}" ]]; then
-    echo "" >> "$UDEV_RULES_FILE"
-    echo "# {% endraw %}{{ nic.alias }}{% raw %} - bond0" >> "$UDEV_RULES_FILE"
-    echo "SUBSYSTEM==\"net\", ACTION==\"add\", ATTR{address}==\"$MAC_FOR_UDEV_{% endraw %}{{ loop.index }}{% raw %}\", NAME=\"$CURRENT_IFACE_{% endraw %}{{ loop.index }}{% raw %}\"" >> "$UDEV_RULES_FILE"
+if [ -n "$IFACE_{{ loop.index }}" ]; then
+    printf '\nSUBSYSTEM=="net", ACTION=="add", ATTR{address}=="%s", NAME="%s"\n' \
+        "$(echo '{{ nic.mac }}' | tr '[:upper:]' '[:lower:]')" \
+        "$IFACE_{{ loop.index }}" >> "$UDEV_RULES_FILE"
 fi
-{% endraw %}
 {% endfor %}
-
 udevadm control --reload-rules
 log "udev-Regeln geschrieben und neu geladen"
 
-# -- 4d: /etc/network/interfaces.d/bond0-vmbr0 schreiben ----------------------
-log "Netzwerkkonfiguration schreiben: /etc/network/interfaces.d/bond0-vmbr0"
+# -- 4c: /etc/network/interfaces.d/bond0-vmbr0 schreiben ----------------------
+log "Netzwerkkonfiguration schreiben"
 mkdir -p /etc/network/interfaces.d
-
-# Sicherstellen dass interfaces die .d-Dateien einliest
 grep -q 'source /etc/network/interfaces.d/\*' /etc/network/interfaces || \
     echo 'source /etc/network/interfaces.d/*' >> /etc/network/interfaces
 
-# Bestehende DHCP-Konfiguration vom Installer ermitteln
-{% raw %}
 DHCP_IFACE=$(awk '/^iface .* inet dhcp/{print $2; exit}' /etc/network/interfaces || true)
-log "Vom Installer angelegte DHCP-Schnittstelle: ${DHCP_IFACE:-keine gefunden}"
-{% endraw %}
+log "Vom Installer angelegte DHCP-Schnittstelle: ${DHCP_IFACE:-keine}"
 
-# bond0-vmbr0 Konfigurationsdatei
+# Slave-Interfaces dynamisch erzeugen
+SLAVE_STANZAS=""
+for slave in "${BOND0_SLAVES[@]}"; do
+    SLAVE_STANZAS="${SLAVE_STANZAS}auto ${slave}\niface ${slave} inet manual\n    bond-master bond0\n\n"
+done
+
 cat > /etc/network/interfaces.d/bond0-vmbr0 <<NETCFG
-# =============================================================================
-# bond0 - Management + Corosync (LACP fast)
 # Generiert durch PVE firstboot.sh
-# bond0-Slaves (MAC-basiert):
+# bond0-Slaves:
 {% for nic in pve_nic_aliases | selectattr('role', 'equalto', 'bond0') %}
-# {{ nic.alias }}: {{ nic.mac }}
+#   {{ nic.alias }}: {{ nic.mac }}
 {% endfor %}
-# =============================================================================
 
-# Slave-Interfaces (keine IP, nur "manual")
-{% raw %}
-$(for slave in "${BOND0_SLAVES[@]}"; do
-    cat <<EOF
-auto $slave
-iface $slave inet manual
-    bond-master bond0
-
-EOF
-done)
-{% endraw %}
-# bond0 - LACP 802.3ad, fast rate (PFLICHT fuer Corosync!)
+$(printf '%b' "${SLAVE_STANZAS}")
 auto bond0
 iface bond0 inet manual
-{% raw %}
     bond-slaves     ${BOND0_SLAVES[*]}
-{% endraw %}
     bond-mode       802.3ad
     bond-xmit-hash-policy layer3+4
     bond-lacp-rate  fast
     bond-miimon     100
     up ip link set bond0 mtu {{ pve_bond0_mtu | default(1500) }}
 
-# vmbr0 - Management-Bridge
 auto vmbr0
 iface vmbr0 inet static
     address  {{ pve_node_ip }}/{{ pve_node_cidr_prefix }}
@@ -291,59 +219,43 @@ iface vmbr0 inet static
     bridge-ports bond0
     bridge-stp   off
     bridge-fd    0
-    # Corosync: jumbo frames optional (align mit Switch-Konfiguration)
-    # up ip link set vmbr0 mtu 9000
 NETCFG
-
 log "Netzwerkkonfiguration geschrieben"
 
-# -- 4e: DHCP-Interface aus der Haupt-interfaces-Datei auskommentieren --------
-{% raw %}
-if [[ -n "${DHCP_IFACE:-}" ]]; then
-    log "DHCP-Interface '${DHCP_IFACE}' in /etc/network/interfaces deaktivieren"
-    # auto-Zeile und iface-Zeile auskommentieren
+# -- 4d: DHCP-Interface deaktivieren -----------------------------------------
+if [ -n "${DHCP_IFACE:-}" ]; then
+    log "DHCP-Interface '${DHCP_IFACE}' deaktivieren"
     sed -i "/^auto ${DHCP_IFACE}$/s/^/# /" /etc/network/interfaces
     sed -i "/^iface ${DHCP_IFACE} inet dhcp/s/^/# /" /etc/network/interfaces
 fi
-{% endraw %}
 
-# -- 4f: Bond + Bridge hochbringen -------------------------------------------
-log "bond0-Slaves in promisc-Mode setzen"
-{% raw %}
+# -- 4e: Bond + Bridge hochbringen -------------------------------------------
+log "bond0-Slaves vorbereiten"
 for slave in "${BOND0_SLAVES[@]}"; do
-    # Vorherige IP/Link-Konfiguration vom DHCP entfernen
     ip addr flush dev "$slave" 2>/dev/null || true
     ip link set "$slave" down 2>/dev/null || true
 done
-{% endraw %}
 
-log "bond0 und vmbr0 hochbringen (ifup)"
-# ifup ist von ifupdown2 (Proxmox-Standard) - unterstuetzt Bonds nativ
-ifup bond0    || fail "ifup bond0 fehlgeschlagen"
-ifup vmbr0    || fail "ifup vmbr0 fehlgeschlagen"
+log "bond0 und vmbr0 hochbringen"
+ifup bond0  || fail "ifup bond0 fehlgeschlagen"
+ifup vmbr0  || fail "ifup vmbr0 fehlgeschlagen"
 
-# Kurz warten bis der Bond LACP-Negotiation abgeschlossen hat
 log "Warte auf LACP-Negotiation (max 10s)"
-{% raw %}
-for i in $(seq 1 10); do
+for i in 1 2 3 4 5 6 7 8 9 10; do
     if ip link show bond0 | grep -q 'state UP'; then
         log "bond0 ist UP nach ${i}s"
         break
     fi
     sleep 1
 done
-{% endraw %}
 
-# Erreichbarkeit des Gateways pruefen
 if ping -c 2 -W 2 "{{ pve_node_gw }}" >/dev/null 2>&1; then
-    log "Gateway {{ pve_node_gw }} erreichbar - Netzwerk OK"
+    log "Gateway {{ pve_node_gw }} erreichbar – Netzwerk OK"
 else
     log "WARNUNG: Gateway {{ pve_node_gw }} nicht erreichbar."
     log "  Moegliche Ursache: Switch-Port noch nicht im Trunk/LACP-Modus."
-{% raw %}
-    log "  Bond0-Status: $(cat /proc/net/bonding/bond0 2>/dev/null | grep 'MII Status' | head -2)"
-{% endraw %}
-    # Kein fail() - LACP braucht manchmal laenger bei bestimmten Switches
+    BOND_STATUS=$(cat /proc/net/bonding/bond0 2>/dev/null | grep 'MII Status' | head -2 || true)
+    log "  Bond0-Status: ${BOND_STATUS}"
 fi
 
 log "=== Phase 4 abgeschlossen: bond0/vmbr0 auf {{ pve_node_ip }}/{{ pve_node_cidr_prefix }} ==="
