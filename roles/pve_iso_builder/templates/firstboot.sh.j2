@@ -23,8 +23,8 @@
 #   APT in Phase 1/2 würde ohne Netzwerk scheitern!
 #
 # Render-Zeit vs. Laufzeit:
-#   {{ }}  / {% %}  → Jinja2, wird von Ansible beim ISO-Build aufgelöst
-#   ${ }   / $(  )  → Bash,   wird auf dem Node zur Laufzeit ausgeführt
+#   {# Jinja2: {{ var }} / {% if %} #}  → wird von Ansible beim ISO-Build aufgelöst
+#   ${ }   / $(  )                      → Bash, wird auf dem Node zur Laufzeit ausgeführt
 # =============================================================================
 {% raw %}
 set -euo pipefail
@@ -155,18 +155,17 @@ BOND0_ALIASES=()
 {% for nic in bond0_nics %}
 # {{ nic.alias }} ({{ nic.mac }})
 MAC_LOWER_{{ loop.index }}=$(echo "{{ nic.mac }}" | tr '[:upper:]' '[:lower:]')
-{% raw %}
-if [[ -n "${MAC_TO_IFACE[{% endraw %}$MAC_LOWER_{{ loop.index }}{% raw %}]:-}" ]]; then
-    IFACE_{% endraw %}{{ loop.index }}{% raw %}="${MAC_TO_IFACE[${% endraw %}MAC_LOWER_{{ loop.index }}{% raw %}]}"
-    log "  OK: {% endraw %}{{ nic.alias }} ({{ nic.mac }}){% raw %} -> $IFACE_{% endraw %}{{ loop.index }}"
+if [[ -n "${MAC_TO_IFACE[MAC_LOWER_{{ loop.index }}]:-}" ]]; then
+    IFACE_{{ loop.index }}="${MAC_TO_IFACE[MAC_LOWER_{{ loop.index }}]}"
+    log "  OK: {{ nic.alias }} ({{ nic.mac }}) -> $IFACE_{{ loop.index }}"
     BOND0_SLAVES+=("$IFACE_{{ loop.index }}")
     BOND0_ALIASES+=("{{ nic.alias }}")
 else
     log "  WARNUNG: MAC {{ nic.mac }} ({{ nic.alias }}) nicht gefunden!"
 {% raw %}
     log "  Verfuegbare MACs: ${!MAC_TO_IFACE[*]}"
-fi
 {% endraw %}
+fi
 {% endfor %}
 
 {% raw %}
@@ -192,13 +191,11 @@ UDEV_HEADER
 
 {% for nic in bond0_nics %}
 MAC_FOR_UDEV_{{ loop.index }}=$(echo "{{ nic.mac }}" | tr '[:upper:]' '[:lower:]')
-{% raw %}
-CURRENT_IFACE_{% endraw %}{{ loop.index }}{% raw %}="${MAC_TO_IFACE[${% endraw %}MAC_FOR_UDEV_{{ loop.index }}{% raw %}]:-}"
-if [[ -n "$CURRENT_IFACE_{% endraw %}{{ loop.index }}" ]]; then
+CURRENT_IFACE_{{ loop.index }}="${MAC_TO_IFACE[MAC_FOR_UDEV_{{ loop.index }}]:-}"
+if [[ -n "$CURRENT_IFACE_{{ loop.index }}" ]]; then
     echo "" >> "$UDEV_RULES_FILE"
     echo "# {{ nic.alias }} - bond0" >> "$UDEV_RULES_FILE"
-{% raw %}
-    echo "SUBSYSTEM==\"net\", ACTION==\"add\", ATTR{address}==\"$MAC_FOR_UDEV_{% endraw %}{{ loop.index }}{% raw %}\", NAME=\"$CURRENT_IFACE_{% endraw %}{{ loop.index }}\"" >> "$UDEV_RULES_FILE"
+    echo "SUBSYSTEM==\"net\", ACTION==\"add\", ATTR{address}==\"$MAC_FOR_UDEV_{{ loop.index }}\", NAME=\"$CURRENT_IFACE_{{ loop.index }}\"" >> "$UDEV_RULES_FILE"
 fi
 {% endfor %}
 
