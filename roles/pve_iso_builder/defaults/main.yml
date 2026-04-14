@@ -43,3 +43,28 @@ pve_cluster_link1_ip:    ""
 
 # -- Disk ---------------------------------------------------------------------
 pve_disk_list:           []
+
+# -- Proxmox Subscription -----------------------------------------------------
+# false  → No-Subscription-Repo wird aktiviert, Enterprise-Repo deaktiviert
+# true   → Enterprise-Repos bleiben aktiv (Subscription-Key in answer.toml)
+# Kann global in group_vars/pve_nodes.yml oder per Node in host_vars/ gesetzt werden.
+pve_use_subscription:    false
+
+# -- SSH-Härtung (Phase 2 firstboot) -----------------------------------------
+pve_ssh_permit_root_login:  "prohibit-password"   # prohibit-password | yes | no
+pve_ssh_password_auth:      "no"                  # yes | no
+
+# -- lldpd (Phase 5 firstboot) ------------------------------------------------
+lldpd_configure:            true
+lldpd_port_id_subtype:      "macaddress"           # macaddress | ifname
+lldpd_system_description:   "Proxmox VE Node"
+
+# -- Zusatzpakete (Phase 4 firstboot, immer installiert: ifenslave ethtool) ---
+# lldpd ist hier als Default enthalten; wird in Phase 5 konfiguriert.
+pve_extra_packages:
+  - lldpd
+
+# -- NTP-Server (Phase 5 firstboot) -------------------------------------------
+# Leer lassen → kein NTP-Block wird gerendert (systemd-timesyncd Defaults bleiben)
+# Beispiel: ["0.de.pool.ntp.org", "1.de.pool.ntp.org"]
+pve_ntp_servers:            []
