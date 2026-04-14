@@ -1,4 +1,3 @@
-{% raw %}
 #!/usr/bin/env bash
 # =============================================================================
 # Proxmox VE First-Boot Hook
@@ -27,6 +26,7 @@
 #   {{ }}  / {% %}  → Jinja2, wird von Ansible beim ISO-Build aufgelöst
 #   ${ }   / $(  )  → Bash,   wird auf dem Node zur Laufzeit ausgeführt
 # =============================================================================
+{% raw %}
 set -euo pipefail
 exec > >(tee -a /var/log/pve-firstboot.log) 2>&1
 
@@ -47,11 +47,13 @@ wait_for_apt() {
         sleep 3
     done
 }
+{% endraw %}
 
 # =============================================================================
 # Phase 1: APT-Repo-Dateien umschreiben (nur Disk – kein Netzwerk nötig)
 # =============================================================================
 {% if not pve_use_subscription %}
+{% raw %}
 log "Phase 1: Enterprise-Repos deaktivieren, no-subscription aktivieren"
 for f in /etc/apt/sources.list.d/pve-enterprise.list \
           /etc/apt/sources.list.d/ceph.list; do
@@ -65,6 +67,7 @@ deb http://deb.debian.org/debian trixie main contrib non-free-firmware
 deb http://deb.debian.org/debian trixie-updates main contrib non-free-firmware
 deb http://security.debian.org/debian-security trixie-security main contrib non-free-firmware
 EOF
+{% endraw %}
 {% else %}
 log "Phase 1: Enterprise-Repos beibehalten (Subscription aktiv)"
 {% endif %}
@@ -72,10 +75,13 @@ log "Phase 1: Enterprise-Repos beibehalten (Subscription aktiv)"
 # =============================================================================
 # Phase 2: System härten – SSH + sysctl (nur Disk – kein Netzwerk nötig)
 # =============================================================================
+{% raw %}
 log "Phase 2: SSH härten"
 declare -A SSH_OPTS=(
+{% endraw %}
   ["PermitRootLogin"]="{{ pve_ssh_permit_root_login | default('prohibit-password') }}"
   ["PasswordAuthentication"]="{{ pve_ssh_password_auth | default('no') }}"
+{% raw %}
   ["X11Forwarding"]="no"
   ["MaxAuthTries"]="3"
   ["LoginGraceTime"]="30"
@@ -99,18 +105,11 @@ kernel.kptr_restrict = 2
 kernel.dmesg_restrict = 1
 EOF
 sysctl --system >/dev/null 2>&1
+{% endraw %}
 
 # =============================================================================
 # Phase 3: Management-Bond (bond0 + vmbr0) via MAC-Adressen aufbauen
 #          => Netzwerk wird hier erst hergestellt!
-#
-# Strategie:
-#   a) Alle NICs und deren MACs via /sys/class/net einlesen
-#   b) Konfigurierte bond0-MACs gegen die gelesenen MACs abgleichen
-#   c) udev-Regeln für stabile Interfacenamen schreiben
-#   d) /etc/network/interfaces.d/bond0-vmbr0 schreiben (LACP fast)
-#   e) Slaves einzeln hochbringen, dann bond0, dann vmbr0
-#   f) DHCP-Interface deaktivieren
 #
 # bond0-MACs (zur Render-Zeit aus host_vars aufgelöst):
 {% set bond0_nics = pve_nic_aliases | selectattr('role', 'equalto', 'bond0') | list %}
@@ -124,12 +123,12 @@ sysctl --system >/dev/null 2>&1
 # =============================================================================
 log "Phase 3: Management-Bond bond0 + vmbr0 aufbauen"
 
-# Laufzeit-Guard (wird nur erreicht wenn Jinja2-Guard oben nicht gegriffen hat)
 {% if bond0_nics | length == 0 %}
 fail "FATAL: pve_nic_aliases enthält keine bond0-Einträge für {{ _node_name }}! Abbruch."
 {% endif %}
 
 # -- 3a: MAC -> Interfacename Lookup ------------------------------------------
+{% raw %}
 declare -A MAC_TO_IFACE=()
 
 for iface_path in /sys/class/net/*/address; do
@@ -145,31 +144,40 @@ log "Gefundene physische Interfaces:"
 for mac in "${!MAC_TO_IFACE[@]}"; do
     log "  ${MAC_TO_IFACE[$mac]} -> $mac"
 done
+{% endraw %}
 
 # -- 3b: Konfigurierte bond0-MACs auflösen ------------------------------------
+{% raw %}
 BOND0_SLAVES=()
 BOND0_ALIASES=()
+{% endraw %}
 
 {% for nic in bond0_nics %}
 # {{ nic.alias }} ({{ nic.mac }})
 MAC_LOWER_{{ loop.index }}=$(echo "{{ nic.mac }}" | tr '[:upper:]' '[:lower:]')
-if [[ -n "${MAC_TO_IFACE[$MAC_LOWER_{{ loop.index }}]:-}" ]]; then
-    IFACE_{{ loop.index }}="${MAC_TO_IFACE[$MAC_LOWER_{{ loop.index }}]}"
-    log "  OK: {{ nic.alias }} ({{ nic.mac }}) -> $IFACE_{{ loop.index }}"
+{% raw %}
+if [[ -n "${MAC_TO_IFACE[{% endraw %}$MAC_LOWER_{{ loop.index }}{% raw %}]:-}" ]]; then
+    IFACE_{% endraw %}{{ loop.index }}{% raw %}="${MAC_TO_IFACE[${% endraw %}MAC_LOWER_{{ loop.index }}{% raw %}]}"
+    log "  OK: {% endraw %}{{ nic.alias }} ({{ nic.mac }}){% raw %} -> $IFACE_{% endraw %}{{ loop.index }}"
     BOND0_SLAVES+=("$IFACE_{{ loop.index }}")
     BOND0_ALIASES+=("{{ nic.alias }}")
 else
     log "  WARNUNG: MAC {{ nic.mac }} ({{ nic.alias }}) nicht gefunden!"
+{% raw %}
     log "  Verfuegbare MACs: ${!MAC_TO_IFACE[*]}"
 fi
+{% endraw %}
 {% endfor %}
 
+{% raw %}
 [[ ${#BOND0_SLAVES[@]} -lt 1 ]] && \
     fail "Keine bond0-NIC gefunden! Konfigurierte MACs nicht auf diesem System vorhanden."
 
 log "bond0 Slaves: ${BOND0_SLAVES[*]}"
+{% endraw %}
 
 # -- 3c: Persistente udev-Regeln für bond0-Slaves -----------------------------
+{% raw %}
 log "udev-Regeln schreiben: /etc/udev/rules.d/70-pve-nic-aliases.rules"
 mkdir -p /etc/udev/rules.d
 UDEV_RULES_FILE="/etc/udev/rules.d/70-pve-nic-aliases.rules"
@@ -180,37 +188,27 @@ cat > "$UDEV_RULES_FILE" <<'UDEV_HEADER'
 # Ansible (mac_resolve.yml) erweitert diese Datei später um bond1/bond2.
 # =============================================================================
 UDEV_HEADER
+{% endraw %}
 
 {% for nic in bond0_nics %}
 MAC_FOR_UDEV_{{ loop.index }}=$(echo "{{ nic.mac }}" | tr '[:upper:]' '[:lower:]')
-CURRENT_IFACE_{{ loop.index }}="${MAC_TO_IFACE[$MAC_FOR_UDEV_{{ loop.index }}]:-}"
-if [[ -n "$CURRENT_IFACE_{{ loop.index }}" ]]; then
+{% raw %}
+CURRENT_IFACE_{% endraw %}{{ loop.index }}{% raw %}="${MAC_TO_IFACE[${% endraw %}MAC_FOR_UDEV_{{ loop.index }}{% raw %}]:-}"
+if [[ -n "$CURRENT_IFACE_{% endraw %}{{ loop.index }}" ]]; then
     echo "" >> "$UDEV_RULES_FILE"
     echo "# {{ nic.alias }} - bond0" >> "$UDEV_RULES_FILE"
-    echo "SUBSYSTEM==\"net\", ACTION==\"add\", ATTR{address}==\"$MAC_FOR_UDEV_{{ loop.index }}\", NAME=\"$CURRENT_IFACE_{{ loop.index }}\"" >> "$UDEV_RULES_FILE"
+{% raw %}
+    echo "SUBSYSTEM==\"net\", ACTION==\"add\", ATTR{address}==\"$MAC_FOR_UDEV_{% endraw %}{{ loop.index }}{% raw %}\", NAME=\"$CURRENT_IFACE_{% endraw %}{{ loop.index }}\"" >> "$UDEV_RULES_FILE"
 fi
 {% endfor %}
 
+{% raw %}
 udevadm control --reload-rules
 log "udev-Regeln geschrieben und neu geladen"
+{% endraw %}
 
 # -- 3d: /etc/network/interfaces.d/bond0-vmbr0 schreiben ----------------------
-#
-# DESIGN:
-#   Die Interfaces-Datei enthält zwei Kategorien von Werten:
-#     A) Render-Zeit (Jinja2): IP, GW, DNS, MTU – aus host_vars bekannt
-#     B) Laufzeit (Bash):      Slave-Interfacenamen (ens1f0, eno1, …) –
-#                              erst zur Laufzeit via MAC-Lookup bekannt
-#
-#   Lösung: write_interfaces_file()-Funktion
-#     - Slave-Blöcke: printf-Loop über ${BOND0_SLAVES[@]} (Bash expandiert)
-#     - bond0/vmbr0:  <<STATIC Heredoc (ungequotet → Bash expandiert ${})
-#     - IP/GW/DNS:    direkt als Literale eingebettet (Jinja2-Render-Zeit)
-#
-#   WARUM NICHT <<'NETCFG'? Ein gequotetes Heredoc schützt ALLE $-Ausdrücke
-#   vor Bash-Expansion – auch die Slave-Array-Referenzen. Die Slave-Namen
-#   sind zur Render-Zeit nicht bekannt → gequotetes Heredoc ist hier falsch.
-#
+{% raw %}
 log "Netzwerkkonfiguration schreiben: /etc/network/interfaces.d/bond0-vmbr0"
 mkdir -p /etc/network/interfaces.d
 
@@ -223,7 +221,6 @@ log "Vom Installer angelegte DHCP-Schnittstelle: ${DHCP_IFACE:-keine gefunden}"
 write_interfaces_file() {
     local out="/etc/network/interfaces.d/bond0-vmbr0"
     {
-        # Header-Kommentar (statisch)
         cat <<'HEADER'
 # =============================================================================
 # bond0 - Management + Corosync (LACP fast)
@@ -232,14 +229,11 @@ write_interfaces_file() {
 # =============================================================================
 HEADER
 
-        # Slave-Stanzas: Bash expandiert ${BOND0_SLAVES[@]} zur Laufzeit
         for slave in "${BOND0_SLAVES[@]}"; do
             printf "auto %s\niface %s inet manual\n    bond-master bond0\n\n" \
                    "$slave" "$slave"
         done
 
-        # bond0 + vmbr0: ungequotetes Heredoc → Bash expandiert ${BOND0_SLAVES[*]}
-        # Jinja2-Werte ({{ }}) sind bereits zur Build-Zeit eingebettet
         cat <<STATIC
 auto bond0
 iface bond0 inet manual
@@ -248,13 +242,17 @@ iface bond0 inet manual
     bond-xmit-hash-policy layer3+4
     bond-lacp-rate  fast
     bond-miimon     100
+{% endraw %}
     up ip link set bond0 mtu {{ pve_bond0_mtu | default(1500) }}
+{% raw %}
 
 auto vmbr0
 iface vmbr0 inet static
+{% endraw %}
     address  {{ pve_node_ip }}/{{ pve_node_cidr_prefix }}
     gateway  {{ pve_node_gw }}
     dns-nameservers {{ pve_node_dns }}
+{% raw %}
     bridge-ports bond0
     bridge-stp   off
     bridge-fd    0
@@ -265,15 +263,19 @@ STATIC
 }
 
 write_interfaces_file
+{% endraw %}
 
 # -- 3e: DHCP-Interface deaktivieren -----------------------------------------
+{% raw %}
 if [[ -n "${DHCP_IFACE:-}" ]]; then
     log "DHCP-Interface '${DHCP_IFACE}' deaktivieren"
     sed -i "/^auto ${DHCP_IFACE}$/s/^/# /" /etc/network/interfaces
     sed -i "/^iface ${DHCP_IFACE} inet dhcp/s/^/# /" /etc/network/interfaces
 fi
+{% endraw %}
 
 # -- 3f: Bond + Bridge hochbringen (Reihenfolge: Slaves → bond0 → vmbr0) ------
+{% raw %}
 log "bond0-Slaves vorbereiten (flush + down)"
 for slave in "${BOND0_SLAVES[@]}"; do
     ip addr flush dev "$slave" 2>/dev/null || true
@@ -295,14 +297,17 @@ for i in $(seq 1 10); do
     fi
     sleep 1
 done
+{% endraw %}
 
 if ping -c 2 -W 2 "{{ pve_node_gw }}" >/dev/null 2>&1; then
     log "Gateway {{ pve_node_gw }} erreichbar – Netzwerk OK"
 else
     log "WARNUNG: Gateway {{ pve_node_gw }} nicht erreichbar."
     log "  Mögliche Ursache: Switch-Port noch nicht im Trunk/LACP-Modus."
+{% raw %}
     log "  Bond0-Status: $(cat /proc/net/bonding/bond0 2>/dev/null | grep 'MII Status' | head -2)"
 fi
+{% endraw %}
 
 log "=== Phase 3 abgeschlossen: bond0/vmbr0 auf {{ pve_node_ip }}/{{ pve_node_cidr_prefix }} ==="
 
@@ -310,51 +315,62 @@ log "=== Phase 3 abgeschlossen: bond0/vmbr0 auf {{ pve_node_ip }}/{{ pve_node_ci
 # Phase 4: APT update + Pakete installieren
 #          Netzwerk steht jetzt über vmbr0 ({{ pve_node_ip }}) bereit.
 # =============================================================================
+{% raw %}
 log "Phase 4: Basis-Pakete installieren"
 wait_for_apt
 DEBIAN_FRONTEND=noninteractive apt-get update -qq
 
-# Pakete: ifenslave + ethtool immer, pve_extra_packages optional
-# Space-joined zur Build-Zeit (kein Loop → kein Trailing-Newline-nach-\-Bug)
 DEBIAN_FRONTEND=noninteractive apt-get install -y \
     ifenslave \
     ethtool \
+{% endraw %}
     {{ (pve_extra_packages | default(['lldpd'])) | join(' \\\n    ') }}
 
 # =============================================================================
 # Phase 5: Post-Network-Tasks (lldpd, NTP, Subscription-Popup)
 # =============================================================================
 {% if lldpd_configure | default(true) %}
+{% raw %}
 log "Phase 5: lldpd konfigurieren"
 mkdir -p /etc/lldpd.d
 cat > /etc/lldpd.d/00-proxmox.conf <<'EOF'
+{% endraw %}
 configure lldp portidsubtype {{ lldpd_port_id_subtype | default('macaddress') }}
 configure system description "{{ lldpd_system_description | default('Proxmox VE Node') }}"
 configure system platform "Proxmox VE"
 configure lldp tx-interval 30
 EOF
+{% raw %}
 systemctl enable --now lldpd
+{% endraw %}
 {% endif %}
 
 {% if pve_ntp_servers is defined %}
+{% raw %}
 log "Phase 5: NTP konfigurieren"
 cat > /etc/systemd/timesyncd.conf <<'EOF'
 [Time]
+{% endraw %}
 NTP={{ pve_ntp_servers | join(' ') }}
 FallbackNTP=pool.ntp.org
 EOF
+{% raw %}
 systemctl restart systemd-timesyncd && timedatectl set-ntp true
+{% endraw %}
 {% endif %}
 
 {% if not pve_use_subscription %}
+{% raw %}
 log "Phase 5: Subscription-Warnung deaktivieren"
 PVEUI="/usr/share/javascript/proxmox-widget-toolkit/proxmoxlib.js"
 [ -f "$PVEUI" ] && cp "$PVEUI" "${PVEUI}.bak" && \
     sed -i "s/Ext.Msg.show({/void({/g" "$PVEUI" 2>/dev/null || true
+{% endraw %}
 {% endif %}
 
 log "=== Ansible kann den Node jetzt unter {{ pve_node_ip }} erreichen ==="
 log "=== Nächste Schritte via Ansible: bond1, bond2, Storage-Bridges, Cluster ==="
 log "=== First-Boot vollständig abgeschlossen ==="
+{% raw %}
 touch /var/lib/pve-firstboot-done
 {% endraw %}
