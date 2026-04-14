@@ -1,9 +1,12 @@
----
 # =============================================================================
 # Playbook 1 – Proxmox VE 9 Unattended ISO erzeugen
 # Ausführen: ansible-playbook 01_build_iso.yml
+#
+# Läuft auf dem iso_builder-Host.
+# Baut für JEDE Node in groups['proxmox_nodes'] eine eigene ISO:
+#   proxmox-ve_<node>.iso  mit node-spezifischem FQDN im answer.toml.
 # =============================================================================
-- name: Proxmox VE Unattended ISO erzeugen
+- name: Proxmox VE Unattended ISOs erzeugen (eine pro Node)
   hosts: iso_builder
   gather_facts: true
 
@@ -23,14 +26,38 @@
           - pve_root_ssh_keys | length > 0
         fail_msg: "pve_root_ssh_keys enthält keinen SSH Public Key!"
 
-  roles:
-    - role: pve_iso_builder
+  tasks:
+    - name: "iso | Build-Abhängigkeiten installieren"
+      ansible.builtin.apt:
+        name:
+          - proxmox-auto-install-assistant
+          - wget
+          - whois
+        state: present
+        update_cache: true
+      become: true
+      when: ansible_os_family == "Debian"
+
+    - name: "iso | Pro Node – answer.toml + ISO erzeugen"
+      ansible.builtin.include_role:
+        name: pve_iso_builder
+      vars:
+        _node_name:              "{{ item }}"
+        _node_fqdn:              "{{ item }}.{{ hostvars[item]['pve_domain'] }}"
+        _node_ip:                "{{ hostvars[item]['ansible_host'] }}"
+        pve_iso_output_filename: "proxmox-ve_{{ item }}.iso"
+        pve_node_fqdn:           "{{ item }}.{{ hostvars[item]['pve_domain'] }}"
+      loop: "{{ groups['proxmox_nodes'] | flatten | select('in', hostvars) | list }}"
+      loop_control:
+        label: "{{ item }} → proxmox-ve_{{ item }}.iso"
 
   post_tasks:
     - name: Zusammenfassung
       ansible.builtin.debug:
-        msg:
-          - "✅ Unattended ISO fertig:"
-          - "   {{ pve_iso_output_dir }}/{{ pve_iso_output_filename }}"
-          - "➡  Nächster Schritt: ISO auf USB/IPMI laden, Node booten,"
-          - "   dann ansible-playbook 02_base_setup.yml ausführen."
+        msg: >-
+          ✅ Unattended ISOs fertig in {{ pve_iso_output_dir }}:
+          {% for node in groups['proxmox_nodes'] | flatten %}
+            - proxmox-ve_{{ node }}.iso  (FQDN: {{ node }}.{{ hostvars[node]['pve_domain'] }})
+          {% endfor %}
+          ➡  Nächster Schritt: ISOs auf USB/IPMI laden, Nodes booten,
+             dann ansible-playbook 02_base_setup.yml ausführen.

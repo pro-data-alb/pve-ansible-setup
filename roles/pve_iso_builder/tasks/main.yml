@@ -1,14 +1,11 @@
----
-- name: "iso | Build-Abhängigkeiten installieren"
-  ansible.builtin.apt:
-    name:
-      - proxmox-auto-install-assistant
-      - wget
-      - whois
-    state: present
-    update_cache: true
-  become: true
-  when: ansible_os_family == "Debian"
+# =============================================================================
+# pve_iso_builder – tasks/main.yml
+#
+# Erwartet folgende Vars (werden vom Playbook-Loop übergeben):
+#   _node_name              – kurzer Hostname, z.B. pd-proxmox04
+#   _node_fqdn              – FQDN, z.B. pd-proxmox04.pro-data.cloud
+#   pve_iso_output_filename – Zieldatei, z.B. proxmox-ve_pd-proxmox04.iso
+# =============================================================================
 
 - name: "iso | Arbeitsverzeichnis anlegen"
   ansible.builtin.file:
@@ -28,22 +25,22 @@
     path: "{{ pve_iso_output_dir }}/{{ pve_iso_filename }}"
   register: _iso_stat
 
-- name: "iso | Fehler wenn ISO fehlt"
+- name: "iso | Fehler wenn Quell-ISO fehlt"
   ansible.builtin.fail:
     msg: "Quell-ISO nicht gefunden: {{ pve_iso_output_dir }}/{{ pve_iso_filename }}"
   when: not _iso_stat.stat.exists
 
-- name: "iso | answer.toml aus Template erzeugen"
+- name: "iso | answer.toml erzeugen ({{ _node_fqdn }})"
   ansible.builtin.template:
     src:  answer.toml.j2
-    dest: "{{ pve_iso_output_dir }}/answer.toml"
+    dest: "{{ pve_iso_output_dir }}/answer_{{ _node_name }}.toml"
     mode: "0640"
   register: _answer_changed
 
-- name: "iso | firstboot.sh aus Template erzeugen"
+- name: "iso | firstboot.sh erzeugen ({{ _node_name }})"
   ansible.builtin.template:
     src:  firstboot.sh.j2
-    dest: "{{ pve_iso_output_dir }}/firstboot.sh"
+    dest: "{{ pve_iso_output_dir }}/firstboot_{{ _node_name }}.sh"
     mode: "0750"
   register: _firstboot_changed
 
@@ -51,35 +48,31 @@
   ansible.builtin.command:
     cmd: >-
       proxmox-auto-install-assistant validate-answer
-      {{ pve_iso_output_dir }}/answer.toml
+      {{ pve_iso_output_dir }}/answer_{{ _node_name }}.toml
   register: _validate_result
   changed_when: false
   when: pve_iso_validate_answer | bool
 
-# FIX Step 4: Output-ISO-Status prüfen (nötig für Rebuild-Logik)
 - name: "iso | Output-ISO: Status prüfen"
   ansible.builtin.stat:
     path: "{{ pve_iso_output_dir }}/{{ pve_iso_output_filename }}"
   register: _iso_out_stat
 
-# FIX Step 4: Output-ISO entfernen wenn Inputs geändert haben
-# Vorher: "creates:" verhinderte Neubau auch nach Template-Änderung!
+# Idempotenz: Output-ISO entfernen wenn Inputs geändert haben
 - name: "iso | Output-ISO entfernen wenn Inputs geändert"
   ansible.builtin.file:
     path:  "{{ pve_iso_output_dir }}/{{ pve_iso_output_filename }}"
     state: absent
   when: _answer_changed.changed or _firstboot_changed.changed
 
-# FIX Step 4: "creates:" entfernt – Rebuild wird durch when-Bedingung gesteuert.
-# ISO wird neu gebaut wenn: noch nicht vorhanden ODER answer.toml/firstboot.sh geändert.
-- name: "iso | Unattended ISO erzeugen"
+- name: "iso | Unattended ISO erzeugen ({{ _node_fqdn }})"
   ansible.builtin.command:
     cmd: >-
       proxmox-auto-install-assistant prepare-iso
       {{ pve_iso_output_dir }}/{{ pve_iso_filename }}
       --fetch-from {{ pve_answer_fetch_from }}
-      --answer-file {{ pve_iso_output_dir }}/answer.toml
-      --on-first-boot {{ pve_iso_output_dir }}/firstboot.sh
+      --answer-file {{ pve_iso_output_dir }}/answer_{{ _node_name }}.toml
+      --on-first-boot {{ pve_iso_output_dir }}/firstboot_{{ _node_name }}.sh
       --output {{ pve_iso_output_dir }}/{{ pve_iso_output_filename }}
   when: not _iso_out_stat.stat.exists or _answer_changed.changed or _firstboot_changed.changed
   changed_when: true
