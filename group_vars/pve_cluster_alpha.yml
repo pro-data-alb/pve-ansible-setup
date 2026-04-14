@@ -1,0 +1,50 @@
+---
+# =============================================================================
+# group_vars/pve_cluster_alpha.yml – Cluster-spezifisch (Ansible Prio 12)
+#
+# Gilt für alle Hosts in der Gruppe 'pve_cluster_alpha'.
+#
+# VARIABLEN-HIERARCHIE:
+#   Überschreibt:  group_vars/proxmox_nodes.yml (Prio 10)
+#                  group_vars/all.yml           (Prio  8)
+#   Überschrieben durch: host_vars/<hostname>.yml (Prio 12, gewinnt bei gleichem Level
+#                        da host_vars > group_vars laut Ansible-Doku)
+#
+# Quelle: https://docs.ansible.com/ansible/latest/playbook_guide/playbooks_variables.html#understanding-variable-precedence
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# CLUSTER-IDENTITÄT
+# host_vars/ nicht nötig – gilt für alle Nodes dieses Clusters
+# -----------------------------------------------------------------------------
+pve_cluster_name: "alpha"
+pve_domain:       "alpha.proxmox.local"
+
+# -----------------------------------------------------------------------------
+# DISK-SETUP – Cluster-Norm
+# Überschreibt proxmox_nodes.yml (Prio 10) und all.yml (Prio 8).
+# Einzelne Nodes können in host_vars/ abweichen (z. B. 3 Disks für RAID-Z).
+#
+# Cluster alpha: SATA/SAS SSDs → sda/sdb, ZFS mirror
+# -----------------------------------------------------------------------------
+pve_disk_list:
+  - "sda"
+  - "sdb"
+
+pve_disk_filesystem:   "zfs"
+pve_disk_zfs_raid:     "mirror"
+pve_disk_zfs_ashift:   12   # 4K-Sektoren (SATA/SAS SSD)
+pve_disk_zfs_compress: "lz4"
+pve_disk_zfs_arc_max:  4096   # MiB
+
+# -----------------------------------------------------------------------------
+# INSTALLER
+# -----------------------------------------------------------------------------
+pve_reboot_on_error: false
+
+# -----------------------------------------------------------------------------
+# NTP – Standort-spezifisch (optional)
+# Auskommentieren um proxmox_nodes.yml-Default zu überschreiben:
+# pve_ntp_servers:
+#   - "ntp.alpha.proxmox.local"
+# -----------------------------------------------------------------------------
