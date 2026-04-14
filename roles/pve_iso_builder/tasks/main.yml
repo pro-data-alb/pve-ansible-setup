@@ -18,16 +18,25 @@
 #        nachfolgenden Tasks + Templates sicher sichtbar.
 #      Ohne diesen Fix: Guard sieht evtl. leere/veraltete pve_nic_aliases
 #      aus dem vorherigen Loop-Durchlauf → firstboot.sh.j2 rendert ohne MACs.
+#
+# BUGFIX (cacheable):
+#   cacheable: false muss auf Task-Ebene stehen (gleiche Einrückung wie 'name:').
+#   Steht es unter set_fact: (als Key), wird es als Variablenname interpretiert
+#   → set_fact wertet dann pve_nic_aliases im Kontext von iso_builder aus
+#   (dort undefined/leer) statt die via include_role vars: übergebene Liste
+#   zu verwenden → firstboot.sh.j2 rendert leere bond0_nics → keine MACs.
 # =============================================================================
 
 # ---------------------------------------------------------------------------
 # STEP 1: Vars aus include_role vars: (Prio 18) sofort als Host-Facts (Prio 22)
 #         auf iso_builder fixieren – VOR Guard und VOR Template-Rendering!
-#         cacheable: false verhindert Loop-State-Leak zwischen Node-Iterationen.
+#
+#         WICHTIG: cacheable: false steht auf Task-Ebene, NICHT unter set_fact:
+#         Falsch:  ansible.builtin.set_fact:\n    cacheable: false\n    var: val
+#         Richtig: ansible.builtin.set_fact:\n    var: val\n  cacheable: false
 # ---------------------------------------------------------------------------
 - name: "iso | set_fact: node-Vars als Host-Facts auf iso_builder fixieren"
   ansible.builtin.set_fact:
-    cacheable: false
     _node_name:              "{{ _node_name }}"
     _node_fqdn:              "{{ _node_fqdn }}"
     pve_node_ip:             "{{ pve_node_ip }}"
@@ -42,6 +51,7 @@
     pve_cluster_link1_ip:    "{{ pve_cluster_link1_ip }}"
     pve_disk_list:           "{{ pve_disk_list }}"
     pve_iso_output_filename: "{{ pve_iso_output_filename }}"
+  cacheable: false
 
 # ---------------------------------------------------------------------------
 # STEP 2: Guard – NACH set_fact, damit Vars bereits als Host-Facts (Prio 22)
