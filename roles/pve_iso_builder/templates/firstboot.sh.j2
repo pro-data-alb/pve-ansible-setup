@@ -21,6 +21,10 @@
 #   Er bringt genau eine NIC per DHCP hoch – dieser Lease wird in Phase 3
 #   abgebaut und durch bond0/vmbr0 ersetzt.
 #   APT in Phase 1/2 würde ohne Netzwerk scheitern!
+#
+# Render-Zeit vs. Laufzeit:
+#   {{ }}  / {% %}  → Jinja2, wird von Ansible beim ISO-Build aufgelöst
+#   ${ }   / $(  )  → Bash,   wird auf dem Node zur Laufzeit ausgeführt
 # =============================================================================
 set -euo pipefail
 exec > >(tee -a /var/log/pve-firstboot.log) 2>&1
@@ -31,9 +35,14 @@ fail() { echo "[firstboot $(date '+%H:%M:%S')] FEHLER: $*" >&2; exit 1; }
 log "=== Start (ordering: ${1:-unknown}) ==="
 
 wait_for_apt() {
-    local r=30
-    while ! flock -n /var/lib/dpkg/lock-frontend -c true 2>/dev/null; do
-        (( r-- <= 0 )) && fail "APT-Lock Timeout nach 90s"
+    local retries=30
+    while flock -n /var/lib/dpkg/lock-frontend true 2>/dev/null; do
+        sleep 0
+        break
+    done
+    while ! flock -n /var/lib/dpkg/lock-frontend true 2>/dev/null; do
+        (( retries-- <= 0 )) && fail "APT-Lock Timeout nach 90s"
+        log "  APT-Lock belegt, warte 3s (${retries} Versuche verbleibend)..."
         sleep 3
     done
 }
@@ -99,7 +108,7 @@ sysctl --system >/dev/null 2>&1
 #   b) Konfigurierte bond0-MACs gegen die gelesenen MACs abgleichen
 #   c) udev-Regeln für stabile Interfacenamen schreiben
 #   d) /etc/network/interfaces.d/bond0-vmbr0 schreiben (LACP fast)
-#   e) bond0 + vmbr0 mit ifup hochbringen
+#   e) Slaves einzeln hochbringen, dann bond0, dann vmbr0
 #   f) DHCP-Interface deaktivieren
 #
 # bond0-MACs (zur Render-Zeit aus host_vars aufgelöst):
@@ -114,7 +123,7 @@ sysctl --system >/dev/null 2>&1
 # =============================================================================
 log "Phase 3: Management-Bond bond0 + vmbr0 aufbauen"
 
-# Laufzeit-Guard
+# Laufzeit-Guard (wird nur erreicht wenn Jinja2-Guard oben nicht gegriffen hat)
 {% if bond0_nics | length == 0 %}
 fail "FATAL: pve_nic_aliases enthält keine bond0-Einträge für {{ _node_name }}! Abbruch."
 {% endif %}
@@ -185,9 +194,22 @@ udevadm control --reload-rules
 log "udev-Regeln geschrieben und neu geladen"
 
 # -- 3d: /etc/network/interfaces.d/bond0-vmbr0 schreiben ----------------------
-# WICHTIG: <<'NETCFG' (gequotet) verhindert dass Bash $-Variablen expandiert
-# bevor bond0/vmbr0 hochgebracht wurden. Jinja2-Ausdruecke {{ }} werden
-# zur Template-Render-Zeit aufgeloest (vor Bash-Ausfuehrung) - das ist korrekt.
+#
+# DESIGN:
+#   Die Interfaces-Datei enthält zwei Kategorien von Werten:
+#     A) Render-Zeit (Jinja2): IP, GW, DNS, MTU – aus host_vars bekannt
+#     B) Laufzeit (Bash):      Slave-Interfacenamen (ens1f0, eno1, …) –
+#                              erst zur Laufzeit via MAC-Lookup bekannt
+#
+#   Lösung: write_interfaces_file()-Funktion
+#     - Slave-Blöcke: printf-Loop über ${BOND0_SLAVES[@]} (Bash expandiert)
+#     - bond0/vmbr0:  <<STATIC Heredoc (ungequotet → Bash expandiert ${})
+#     - IP/GW/DNS:    direkt als Literale eingebettet (Jinja2-Render-Zeit)
+#
+#   WARUM NICHT <<'NETCFG'? Ein gequotetes Heredoc schützt ALLE $-Ausdrücke
+#   vor Bash-Expansion – auch die Slave-Array-Referenzen. Die Slave-Namen
+#   sind zur Render-Zeit nicht bekannt → gequotetes Heredoc ist hier falsch.
+#
 log "Netzwerkkonfiguration schreiben: /etc/network/interfaces.d/bond0-vmbr0"
 mkdir -p /etc/network/interfaces.d
 
@@ -197,25 +219,27 @@ grep -q 'source /etc/network/interfaces.d/\*' /etc/network/interfaces || \
 DHCP_IFACE=$(awk '/^iface .* inet dhcp/{print $2; exit}' /etc/network/interfaces || true)
 log "Vom Installer angelegte DHCP-Schnittstelle: ${DHCP_IFACE:-keine gefunden}"
 
-# FIX: <<'NETCFG' statt <<NETCFG - verhindert vorzeitige $-Expansion durch Bash
-cat > /etc/network/interfaces.d/bond0-vmbr0 <<'NETCFG'
+write_interfaces_file() {
+    local out="/etc/network/interfaces.d/bond0-vmbr0"
+    {
+        # Header-Kommentar (statisch)
+        cat <<'HEADER'
 # =============================================================================
 # bond0 - Management + Corosync (LACP fast)
-# Generiert durch PVE firstboot.sh
-# bond0-Slaves (MAC-basiert):
-{% for nic in bond0_nics %}
-#   {{ nic.alias }}: {{ nic.mac }}
-{% endfor %}
+# Generiert durch PVE firstboot.sh – NICHT manuell bearbeiten!
+# bond0-Slaves werden MAC-basiert zur Laufzeit aufgelöst.
 # =============================================================================
+HEADER
 
-$(for slave in "${BOND0_SLAVES[@]}"; do
-    cat <<EOF
-auto $slave
-iface $slave inet manual
-    bond-master bond0
+        # Slave-Stanzas: Bash expandiert ${BOND0_SLAVES[@]} zur Laufzeit
+        for slave in "${BOND0_SLAVES[@]}"; do
+            printf "auto %s\niface %s inet manual\n    bond-master bond0\n\n" \
+                   "$slave" "$slave"
+        done
 
-EOF
-done)
+        # bond0 + vmbr0: ungequotetes Heredoc → Bash expandiert ${BOND0_SLAVES[*]}
+        # Jinja2-Werte ({{ }}) sind bereits zur Build-Zeit eingebettet
+        cat <<STATIC
 auto bond0
 iface bond0 inet manual
     bond-slaves     ${BOND0_SLAVES[*]}
@@ -233,9 +257,13 @@ iface vmbr0 inet static
     bridge-ports bond0
     bridge-stp   off
     bridge-fd    0
-NETCFG
+STATIC
+    } > "$out"
+    log "  Geschrieben: $out"
+    log "  bond-slaves: ${BOND0_SLAVES[*]}"
+}
 
-log "Netzwerkkonfiguration geschrieben"
+write_interfaces_file
 
 # -- 3e: DHCP-Interface deaktivieren -----------------------------------------
 if [[ -n "${DHCP_IFACE:-}" ]]; then
@@ -244,16 +272,19 @@ if [[ -n "${DHCP_IFACE:-}" ]]; then
     sed -i "/^iface ${DHCP_IFACE} inet dhcp/s/^/# /" /etc/network/interfaces
 fi
 
-# -- 3f: Bond + Bridge hochbringen --------------------------------------------
+# -- 3f: Bond + Bridge hochbringen (Reihenfolge: Slaves → bond0 → vmbr0) ------
 log "bond0-Slaves vorbereiten (flush + down)"
 for slave in "${BOND0_SLAVES[@]}"; do
     ip addr flush dev "$slave" 2>/dev/null || true
     ip link set "$slave" down  2>/dev/null || true
 done
 
-log "bond0 und vmbr0 hochbringen (ifup)"
-ifup bond0 || fail "ifup bond0 fehlgeschlagen"
-ifup vmbr0 || fail "ifup vmbr0 fehlgeschlagen"
+log "bond0-Slaves, bond0 und vmbr0 hochbringen (ifup)"
+for slave in "${BOND0_SLAVES[@]}"; do
+    ifup "$slave" || log "  WARNUNG: ifup $slave fehlgeschlagen (nicht kritisch)"
+done
+ifup bond0  || fail "ifup bond0 fehlgeschlagen"
+ifup vmbr0  || fail "ifup vmbr0 fehlgeschlagen"
 
 log "Warte auf LACP-Negotiation (max 10s)"
 for i in $(seq 1 10); do
@@ -281,15 +312,13 @@ log "=== Phase 3 abgeschlossen: bond0/vmbr0 auf {{ pve_node_ip }}/{{ pve_node_ci
 log "Phase 4: Basis-Pakete installieren"
 wait_for_apt
 DEBIAN_FRONTEND=noninteractive apt-get update -qq
-# FIX: ethtool-Zeile bekommt expliziten Backslash damit der
-#      pve_extra_packages-Loop (auch wenn leer) korrekt angehaengt wird
+
+# Pakete: ifenslave + ethtool immer, pve_extra_packages optional
+# Space-joined zur Build-Zeit (kein Loop → kein Trailing-Newline-nach-\-Bug)
 DEBIAN_FRONTEND=noninteractive apt-get install -y \
     ifenslave \
     ethtool \
-{% for pkg in pve_extra_packages | default(['lldpd']) %}
-    {{ pkg }}{% if not loop.last %} \{% endif %}
-
-{% endfor %}
+    {{ (pve_extra_packages | default(['lldpd'])) | join(' \\\n    ') }}
 
 # =============================================================================
 # Phase 5: Post-Network-Tasks (lldpd, NTP, Subscription-Popup)
