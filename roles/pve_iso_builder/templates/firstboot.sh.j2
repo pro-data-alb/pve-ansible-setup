@@ -31,6 +31,7 @@ fail() { echo "[firstboot $(date '+%H:%M:%S')] FEHLER: $*" >&2; exit 1; }
 
 log "=== Start (ordering: ${1:-unknown}) ==="
 
+{% raw %}
 wait_for_apt() {
     local r=30
     while ! flock -n /var/lib/dpkg/lock-frontend -c true 2>/dev/null; do
@@ -38,6 +39,7 @@ wait_for_apt() {
         sleep 3
     done
 }
+{% endraw %}
 
 # =============================================================================
 # Phase 1: APT-Repos
@@ -98,9 +100,10 @@ systemctl restart systemd-timesyncd && timedatectl set-ntp true
 # Phase 3: System haerten
 # =============================================================================
 log "Phase 3: SSH haerten"
+{% raw %}
 declare -A SSH_OPTS=(
-  ["PermitRootLogin"]="{{ pve_ssh_permit_root_login | default('prohibit-password') }}"
-  ["PasswordAuthentication"]="{{ pve_ssh_password_auth | default('no') }}"
+  ["PermitRootLogin"]="JINJA_SSH_PERMIT_ROOT_LOGIN"
+  ["PasswordAuthentication"]="JINJA_SSH_PASSWORD_AUTH"
   ["X11Forwarding"]="no"
   ["MaxAuthTries"]="3"
   ["LoginGraceTime"]="30"
@@ -113,6 +116,10 @@ for key in "${!SSH_OPTS[@]}"; do
         echo "${key} ${val}" >> /etc/ssh/sshd_config
     fi
 done
+{% endraw %}
+# Patch SSH-Optionen mit Jinja-Werten direkt per sed (raw-Block kann keine Jinja-Vars lesen)
+sed -i "s|JINJA_SSH_PERMIT_ROOT_LOGIN|{{ pve_ssh_permit_root_login | default('prohibit-password') }}|g" /etc/ssh/sshd_config
+sed -i "s|JINJA_SSH_PASSWORD_AUTH|{{ pve_ssh_password_auth | default('no') }}|g" /etc/ssh/sshd_config
 systemctl restart ssh
 
 cat > /etc/sysctl.d/99-pve.conf <<'EOF'
@@ -126,9 +133,11 @@ sysctl --system >/dev/null 2>&1
 
 {% if not pve_use_subscription %}
 log "Subscription-Warnung deaktivieren"
+{% raw %}
 PVEUI="/usr/share/javascript/proxmox-widget-toolkit/proxmoxlib.js"
 [ -f "$PVEUI" ] && cp "$PVEUI" "${PVEUI}.bak" && \
   sed -i "s/Ext.Msg.show({/void({/g" "$PVEUI" 2>/dev/null || true
+{% endraw %}
 {% endif %}
 
 # =============================================================================
@@ -150,6 +159,7 @@ PVEUI="/usr/share/javascript/proxmox-widget-toolkit/proxmoxlib.js"
 log "Phase 4: Management-Bond bond0 + vmbr0 aufbauen"
 
 # -- 4a: MAC -> Interfacename Lookup ------------------------------------------
+{% raw %}
 declare -A MAC_TO_IFACE=()
 
 for iface_path in /sys/class/net/*/address; do
@@ -166,6 +176,7 @@ log "Gefundene physische Interfaces:"
 for mac in "${!MAC_TO_IFACE[@]}"; do
     log "  ${MAC_TO_IFACE[$mac]} -> $mac"
 done
+{% endraw %}
 
 # -- 4b: Konfigurierte bond0-MACs auflösen ------------------------------------
 BOND0_SLAVES=()
@@ -173,25 +184,29 @@ BOND0_ALIASES=()
 
 {% for nic in pve_nic_aliases | selectattr('role', 'equalto', 'bond0') %}
 # {{ nic.alias }} ({{ nic.mac }})
-MAC_LOWER_{{ loop.index }}=$(echo "{{ nic.mac }}" | tr '[:upper:]' '[:lower:]')
-if [[ -n "${MAC_TO_IFACE[$MAC_LOWER_{{ loop.index }}]:-}" ]]; then
-    IFACE_{{ loop.index }}="${MAC_TO_IFACE[$MAC_LOWER_{{ loop.index }}]}"
-    log "  OK: {{ nic.alias }} ({{ nic.mac }}) -> $IFACE_{{ loop.index }}"
-    BOND0_SLAVES+=("$IFACE_{{ loop.index }}")
-    BOND0_ALIASES+=("{{ nic.alias }}")
+{% raw %}
+MAC_LOWER_{% endraw %}{{ loop.index }}=$(echo "{{ nic.mac }}" | tr '[:upper:]' '[:lower:]')
+{% raw %}if [[ -n "${MAC_TO_IFACE[${% endraw %}MAC_LOWER_{{ loop.index }}{% raw %}]:-}" ]]; then
+    IFACE_{% endraw %}{{ loop.index }}{% raw %}="${MAC_TO_IFACE[${% endraw %}MAC_LOWER_{{ loop.index }}{% raw %}]}"
+    log "{% endraw %}  OK: {{ nic.alias }} ({{ nic.mac }}) -> {% raw %}$IFACE_{% endraw %}{{ loop.index }}{% raw %}"
+    BOND0_SLAVES+=("$IFACE_{% endraw %}{{ loop.index }}{% raw %}")
+    BOND0_ALIASES+=("{% endraw %}{{ nic.alias }}{% raw %}")
 else
-    log "  WARNUNG: MAC {{ nic.mac }} ({{ nic.alias }}) nicht gefunden!"
+    log "{% endraw %}  WARNUNG: MAC {{ nic.mac }} ({{ nic.alias }}) nicht gefunden!{% raw %}"
     log "  Verfuegbare MACs: ${!MAC_TO_IFACE[*]}"
     # Kein hartes fail hier - bei nur einer NIC vielleicht akzeptabel
     # Aendern auf fail() wenn Bond zwingend benoetigt wird
 fi
+{% endraw %}
 {% endfor %}
 
 # Mindestens eine Slave-NIC muss gefunden worden sein
+{% raw %}
 [[ ${#BOND0_SLAVES[@]} -lt 1 ]] && \
     fail "Keine bond0-NIC gefunden! Konfigurierte MACs nicht auf diesem System vorhanden."
 
 log "bond0 Slaves: ${BOND0_SLAVES[*]}"
+{% endraw %}
 
 # -- 4c: Persistente udev-Regeln fuer bond0-Slaves ----------------------------
 log "udev-Regeln schreiben: /etc/udev/rules.d/70-pve-nic-aliases.rules"
@@ -207,12 +222,13 @@ UDEV_HEADER
 
 {% for nic in pve_nic_aliases | selectattr('role', 'equalto', 'bond0') %}
 MAC_FOR_UDEV_{{ loop.index }}=$(echo "{{ nic.mac }}" | tr '[:upper:]' '[:lower:]')
-CURRENT_IFACE_{{ loop.index }}="${MAC_TO_IFACE[$MAC_FOR_UDEV_{{ loop.index }}]:-}"
-if [[ -n "$CURRENT_IFACE_{{ loop.index }}" ]]; then
+{% raw %}CURRENT_IFACE_{% endraw %}{{ loop.index }}{% raw %}="${MAC_TO_IFACE[${% endraw %}MAC_FOR_UDEV_{{ loop.index }}{% raw %}]:-}"
+if [[ -n "$CURRENT_IFACE_{% endraw %}{{ loop.index }}{% raw %}" ]]; then
     echo "" >> "$UDEV_RULES_FILE"
-    echo "# {{ nic.alias }} - bond0" >> "$UDEV_RULES_FILE"
-    echo "SUBSYSTEM==\"net\", ACTION==\"add\", ATTR{address}==\"$MAC_FOR_UDEV_{{ loop.index }}\", NAME=\"$CURRENT_IFACE_{{ loop.index }}\"" >> "$UDEV_RULES_FILE"
+    echo "# {% endraw %}{{ nic.alias }}{% raw %} - bond0" >> "$UDEV_RULES_FILE"
+    echo "SUBSYSTEM==\"net\", ACTION==\"add\", ATTR{address}==\"$MAC_FOR_UDEV_{% endraw %}{{ loop.index }}{% raw %}\", NAME=\"$CURRENT_IFACE_{% endraw %}{{ loop.index }}{% raw %}\"" >> "$UDEV_RULES_FILE"
 fi
+{% endraw %}
 {% endfor %}
 
 udevadm control --reload-rules
@@ -227,8 +243,10 @@ grep -q 'source /etc/network/interfaces.d/\*' /etc/network/interfaces || \
     echo 'source /etc/network/interfaces.d/*' >> /etc/network/interfaces
 
 # Bestehende DHCP-Konfiguration vom Installer ermitteln
+{% raw %}
 DHCP_IFACE=$(awk '/^iface .* inet dhcp/{print $2; exit}' /etc/network/interfaces || true)
 log "Vom Installer angelegte DHCP-Schnittstelle: ${DHCP_IFACE:-keine gefunden}"
+{% endraw %}
 
 # bond0-vmbr0 Konfigurationsdatei
 cat > /etc/network/interfaces.d/bond0-vmbr0 <<NETCFG
@@ -242,6 +260,7 @@ cat > /etc/network/interfaces.d/bond0-vmbr0 <<NETCFG
 # =============================================================================
 
 # Slave-Interfaces (keine IP, nur "manual")
+{% raw %}
 $(for slave in "${BOND0_SLAVES[@]}"; do
     cat <<EOF
 auto $slave
@@ -250,10 +269,13 @@ iface $slave inet manual
 
 EOF
 done)
+{% endraw %}
 # bond0 - LACP 802.3ad, fast rate (PFLICHT fuer Corosync!)
 auto bond0
 iface bond0 inet manual
+{% raw %}
     bond-slaves     ${BOND0_SLAVES[*]}
+{% endraw %}
     bond-mode       802.3ad
     bond-xmit-hash-policy layer3+4
     bond-lacp-rate  fast
@@ -276,20 +298,24 @@ NETCFG
 log "Netzwerkkonfiguration geschrieben"
 
 # -- 4e: DHCP-Interface aus der Haupt-interfaces-Datei auskommentieren --------
+{% raw %}
 if [[ -n "${DHCP_IFACE:-}" ]]; then
     log "DHCP-Interface '${DHCP_IFACE}' in /etc/network/interfaces deaktivieren"
     # auto-Zeile und iface-Zeile auskommentieren
     sed -i "/^auto ${DHCP_IFACE}$/s/^/# /" /etc/network/interfaces
     sed -i "/^iface ${DHCP_IFACE} inet dhcp/s/^/# /" /etc/network/interfaces
 fi
+{% endraw %}
 
 # -- 4f: Bond + Bridge hochbringen -------------------------------------------
 log "bond0-Slaves in promisc-Mode setzen"
+{% raw %}
 for slave in "${BOND0_SLAVES[@]}"; do
     # Vorherige IP/Link-Konfiguration vom DHCP entfernen
     ip addr flush dev "$slave" 2>/dev/null || true
     ip link set "$slave" down 2>/dev/null || true
 done
+{% endraw %}
 
 log "bond0 und vmbr0 hochbringen (ifup)"
 # ifup ist von ifupdown2 (Proxmox-Standard) - unterstuetzt Bonds nativ
@@ -298,6 +324,7 @@ ifup vmbr0    || fail "ifup vmbr0 fehlgeschlagen"
 
 # Kurz warten bis der Bond LACP-Negotiation abgeschlossen hat
 log "Warte auf LACP-Negotiation (max 10s)"
+{% raw %}
 for i in $(seq 1 10); do
     if ip link show bond0 | grep -q 'state UP'; then
         log "bond0 ist UP nach ${i}s"
@@ -305,6 +332,7 @@ for i in $(seq 1 10); do
     fi
     sleep 1
 done
+{% endraw %}
 
 # Erreichbarkeit des Gateways pruefen
 if ping -c 2 -W 2 "{{ pve_node_gw }}" >/dev/null 2>&1; then
@@ -312,7 +340,9 @@ if ping -c 2 -W 2 "{{ pve_node_gw }}" >/dev/null 2>&1; then
 else
     log "WARNUNG: Gateway {{ pve_node_gw }} nicht erreichbar."
     log "  Moegliche Ursache: Switch-Port noch nicht im Trunk/LACP-Modus."
+{% raw %}
     log "  Bond0-Status: $(cat /proc/net/bonding/bond0 2>/dev/null | grep 'MII Status' | head -2)"
+{% endraw %}
     # Kein fail() - LACP braucht manchmal laenger bei bestimmten Switches
 fi
 
