@@ -1,43 +1,60 @@
+---
 # =============================================================================
-# group_vars/pve_cluster_pdcloudcust.yml
-# Cluster: pro-data-cloud-cust  |  Nodes: pd-proxmox04/05/06
+# group_vars/pve_cluster_pdcloudcust.yml – Cluster: pro-data-cloud-cust
+# Nodes: pd-proxmox04 / pd-proxmox05 / pd-proxmox06  (Ansible Prio 12)
+#
+# VARIABLEN-HIERARCHIE:
+#   Überschreibt:  group_vars/proxmox_nodes.yml (Prio 10)
+#                  group_vars/all.yml           (Prio  8)
+#   Überschrieben durch: host_vars/<hostname>.yml
+#
+# REGEL: Nur Werte eintragen, die vom Cluster-Default in proxmox_nodes.yml
+#        oder all.yml ABWEICHEN. Identische Werte nicht duplizieren!
 # =============================================================================
 
-# --- Cluster-Identität -------------------------------------------------------
+# -----------------------------------------------------------------------------
+# CLUSTER-IDENTITÄT
+# -----------------------------------------------------------------------------
 pve_cluster_name: "pro-data-cloud-cust"
 pve_domain:       "pro-data.cloud"
 
-# --- Proxmox VE Source-ISO (PVE 9) -------------------------------------------
-pve_iso_url:      "https://enterprise.proxmox.com/iso/proxmox-ve_9.0-1.iso"
-pve_iso_filename: "proxmox-ve_9.0-1.iso"
+# -----------------------------------------------------------------------------
+# ISO-QUELLE – dieser Cluster nutzt PVE 9.0 (abweichend von all.yml 9.1)
+# Überschreibt all.yml
+# -----------------------------------------------------------------------------
+pve_iso_url:        "https://enterprise.proxmox.com/iso/proxmox-ve_9.0-1.iso"
+pve_iso_filename:   "proxmox-ve_9.0-1.iso"
 pve_iso_output_dir: "/opt/pve-isos"
 
-# --- Installer Sprache / Region ----------------------------------------------
-pve_keyboard:  "de"
-pve_country:   "de"
-pve_timezone:  "Europe/Berlin"
-pve_mailto:    "admin@pro-data.cloud"
-
-# --- Sicherheit (PFLICHT – KEIN Default!) ------------------------------------
-# Erzeugen: mkpasswd --method=yescrypt
-# In Vault auslagern: ansible-vault encrypt_string '...' --name pve_root_password_hashed
+# -----------------------------------------------------------------------------
+# SICHERHEIT – Cluster-eigener Hash + SSH-Key
+# PFLICHT: ansible-vault encrypt_string verwenden!
+# Überschreibt all.yml
+# -----------------------------------------------------------------------------
 pve_root_password_hashed: "CHANGEME_yescrypt_hash"
 pve_root_ssh_keys:
   - "ssh-ed25519 AAAA... ansible@pro-data.cloud"
 
-# --- Disk-Setup (ZFS RAID-1) -------------------------------------------------
+# -----------------------------------------------------------------------------
+# DISK-SETUP – Cluster-Norm
+# pd-proxmox04/05/06 haben je eine SSD auf sda
+# Einzelne Nodes können in host_vars/ abweichen.
+# -----------------------------------------------------------------------------
+pve_disk_list:
+  - "sda"
+
 pve_disk_filesystem:   "zfs"
-pve_disk_zfs_raid:     "raid1"
+pve_disk_zfs_raid:     "mirror"   # ⚠️ Single-Disk: auf "raid0" ändern oder 2. Disk zufügen!
 pve_disk_zfs_ashift:   12
 pve_disk_zfs_compress: "lz4"
-# Disk-Filter: alle SSDs von Samsung (Beispiel)
+
+# Disk-Filter (Fallback falls pve_disk_list nicht greift – sollte nicht passieren)
 pve_disk_filter_key:   "vendor"
 pve_disk_filter_value: "SAMSUNG"
 
-# --- Installer-Verhalten -----------------------------------------------------
+# -----------------------------------------------------------------------------
+# INSTALLER-VERHALTEN
+# Überschreibt all.yml
+# -----------------------------------------------------------------------------
 pve_reboot_on_error:     true
-pve_reboot_mode:         "reboot"
 pve_first_boot_ordering: "default"
-pve_iso_download:        true
-pve_iso_validate_answer: true
-pve_answer_fetch_from:   "iso"
