@@ -1,18 +1,19 @@
 ---
 # =============================================================================
-# host_vars – pve-alpha-01  (Primary Node)
+# host_vars – pve-alpha-01  (Primary Node, Cluster alpha)
+#
+# VARIABLEN-HIERARCHIE:
+#   Diese Datei: Prio 12 (höchste Prio – überschreibt group_vars/)
+#   Nur Werte eintragen die vom Cluster-Default (group_vars/pve_cluster_alpha.yml)
+#   ABWEICHEN oder Pflicht-Werte sind (IPs, MACs).
 #
 # NIC-Identifizierung via MAC-Adressen:
-#   Interfacenamen (eno1, ens1f0, …) sind hardware-/treiberabhängig und
-#   im Vorfeld nicht zuverlässig bekannt.
+#   Interfacenamen (eno1, ens1f0, …) sind hardware-/treiberabhängig.
 #   → MACs aus IPMI / Switch-LLDP-Tabelle hier eintragen.
-#   → mac_resolve.yml löst MACs → Kernel-Interfacenamen auf.
-#   → Alias wird in Bond-Comments und udev-Regeln verwendet.
-#
-# Auslesen der MACs vorab (auf dem Node):
-#   ip link show          (zeigt MAC je Interface)
-#   lldpcli show neighbors  (zeigt Switch-Port + MAC)
-#   ipmitool raw 0x0c 0x02 0x01 0x05 0x00 0x00  (IPMI LAN MAC)
+#   Auslesen vorab:
+#     ip link show
+#     lldpcli show neighbors
+#     ipmitool raw 0x0c 0x02 0x01 0x05 0x00 0x00
 # =============================================================================
 
 # -- Management / Corosync ----------------------------------------------------
@@ -21,12 +22,20 @@ pve_node_cidr_prefix: "24"
 pve_node_gw:          "192.168.10.1"
 pve_node_dns:         "192.168.10.1"
 
-# Optionaler zweiter Corosync-Link (z. B. dediziertes Crossover-Netz)
-pve_cluster_link1_ip: ""
+pve_cluster_link1_ip: ""     # Zweiter Corosync-Link (leer = keiner)
 pve_cluster_primary:  true
 
-# =============================================================================
-# NIC-Aliase: MAC-Adresse → Alias + Bond-Zuordnung
+# -- Disk-Setup ---------------------------------------------------------------
+# Überschreibt group_vars/pve_cluster_alpha.yml (Cluster-Default: sda+sdb)
+# pve-alpha-01 hat 3 Disks → ZFS RAID-Z1
+pve_disk_list:
+  - "sda"
+  - "sdb"
+  - "sdc"
+
+pve_disk_zfs_raid: "raidz"   # Überschreibt Cluster-Default "mirror"
+
+# -- NIC-Aliase: MAC → Alias + Bond-Zuordnung --------------------------------
 #
 # role: bond0 = Management/Corosync
 #       bond1 = Storage (NFS/iSCSI)
@@ -34,7 +43,7 @@ pve_cluster_primary:  true
 #
 # WICHTIG: pve_bond1_enabled / pve_bond2_enabled muss auf true gesetzt
 #          werden damit die Slaves auch verwendet werden.
-# =============================================================================
+# -------------------------------------------------------------------------
 pve_nic_aliases:
   # bond0 – Management + Corosync (vmbr0)
   - mac:   "aa:bb:cc:01:01:01"
@@ -81,6 +90,3 @@ pve_storage_bridges:
     address: "10.10.12.11"
     netmask: "24"
     comment: "iSCSI-2"
-
-# -- Disk-Setup (Node-spezifisch überschreiben falls nötig) -------------------
-# pve_disk_list: ["sda", "sdb"]
