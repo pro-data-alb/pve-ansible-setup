@@ -1,3 +1,4 @@
+{% raw %}
 #!/usr/bin/env bash
 # =============================================================================
 # Proxmox VE First-Boot Hook
@@ -356,3 +357,4 @@ log "=== Ansible kann den Node jetzt unter {{ pve_node_ip }} erreichen ==="
 log "=== Nächste Schritte via Ansible: bond1, bond2, Storage-Bridges, Cluster ==="
 log "=== First-Boot vollständig abgeschlossen ==="
 touch /var/lib/pve-firstboot-done
+{% endraw %}
