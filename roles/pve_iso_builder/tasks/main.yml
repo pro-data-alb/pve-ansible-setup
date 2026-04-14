@@ -1,39 +1,18 @@
 # =============================================================================
 # pve_iso_builder – tasks/main.yml
-#
-# Erwartet folgende Vars (werden vom Playbook-Loop via hostvars[_pve_node_item]
-# übergeben):
-#   _node_name              – z.B. pd-proxmox04
-#   _node_fqdn              – z.B. pd-proxmox04.pro-data.cloud
-#   pve_iso_output_filename – z.B. proxmox-ve_pd-proxmox04.iso
-#   pve_node_ip             – Management-IP
-#   pve_nic_aliases         – Liste mit mac/alias/role Einträgen (PFLICHT)
-#
-# FIX: set_fact MUSS als erster Task laufen, BEVOR der Guard-Assert
-#      ausgeführt wird. Hintergrund:
-#        include_role vars: → Priorität 18 (transiente Task-Vars)
-#        ansible.builtin.template rendert im Host-Kontext von iso_builder
-#        → dort existieren node-Vars NICHT als Host-Vars
-#        set_fact → Priorität 22 (Host-Facts) – macht Vars für alle
-#        nachfolgenden Tasks + Templates sicher sichtbar.
-#      Ohne diesen Fix: Guard sieht evtl. leere/veraltete pve_nic_aliases
-#      aus dem vorherigen Loop-Durchlauf → firstboot.sh.j2 rendert ohne MACs.
-#
-# BUGFIX (cacheable):
-#   cacheable: false muss auf Task-Ebene stehen (gleiche Einrückung wie 'name:').
-#   Steht es unter set_fact: (als Key), wird es als Variablenname interpretiert
-#   → set_fact wertet dann pve_nic_aliases im Kontext von iso_builder aus
-#   (dort undefined/leer) statt die via include_role vars: übergebene Liste
-#   zu verwenden → firstboot.sh.j2 rendert leere bond0_nics → keine MACs.
 # =============================================================================
 
 # ---------------------------------------------------------------------------
-# STEP 1: Vars aus include_role vars: (Prio 18) sofort als Host-Facts (Prio 22)
+# STEP 1: Vars aus include_role vars: (Prio 18) als Host-Facts (Prio 22)
 #         auf iso_builder fixieren – VOR Guard und VOR Template-Rendering!
 #
-#         WICHTIG: cacheable: false steht auf Task-Ebene, NICHT unter set_fact:
-#         Falsch:  ansible.builtin.set_fact:\n    cacheable: false\n    var: val
-#         Richtig: ansible.builtin.set_fact:\n    var: val\n  cacheable: false
+#         cacheable: false via args: übergeben – das ist die einzig korrekte
+#         Syntax um set_fact-Modul-Parameter neben den gesetzten Vars zu nutzen:
+#
+#           ansible.builtin.set_fact:
+#             myvar: myval
+#           args:
+#             cacheable: false
 # ---------------------------------------------------------------------------
 - name: "iso | set_fact: node-Vars als Host-Facts auf iso_builder fixieren"
   ansible.builtin.set_fact:
@@ -51,11 +30,11 @@
     pve_cluster_link1_ip:    "{{ pve_cluster_link1_ip }}"
     pve_disk_list:           "{{ pve_disk_list }}"
     pve_iso_output_filename: "{{ pve_iso_output_filename }}"
-  cacheable: false
+  args:
+    cacheable: false
 
 # ---------------------------------------------------------------------------
-# STEP 2: Guard – NACH set_fact, damit Vars bereits als Host-Facts (Prio 22)
-#         vorliegen und der Assert zuverlässig die richtigen Werte sieht.
+# STEP 2: Guard
 # ---------------------------------------------------------------------------
 - name: "iso | Guard: Pflicht-Vars vollständig und bond0-MACs vorhanden?"
   ansible.builtin.assert:
@@ -67,15 +46,15 @@
     fail_msg: >-
       [{{ _node_name }}] pve_nic_aliases / pve_node_ip / pve_node_gw fehlen
       oder pve_nic_aliases enthält keine Einträge mit role=bond0!
-      Prüfe host_vars/{{ _node_name }}.yml – alle Vars müssen dort definiert sein.
+      Prüfe host_vars/{{ _node_name }}.yml
 
 # ---------------------------------------------------------------------------
-# STEP 3: Debug-Ausgabe zur Verifikation der aufgelösten bond0-MACs
+# STEP 3: Debug-Ausgabe
 # ---------------------------------------------------------------------------
 - name: "iso | Debug: bond0-MACs für {{ _node_name }}"
   ansible.builtin.debug:
     msg: >-
-      [{{ _node_name }}] bond0-MACs die ins firstboot.sh gerendert werden:
+      [{{ _node_name }}] bond0-MACs ins firstboot.sh:
       {{ pve_nic_aliases
          | selectattr('role', 'equalto', 'bond0')
          | map(attribute='mac') | list | join(', ') }}
@@ -91,11 +70,6 @@
 
 # ---------------------------------------------------------------------------
 # Quell-ISO – idempotenter Download
-# Strategie:
-#   1. Erst prüfen ob die ISO bereits lokal vorliegt (stat)
-#   2. Download NUR wenn Datei fehlt – kein Re-Download bei erneutem Run
-#   3. pve_iso_download: false – überspringt Download komplett
-#      (z.B. wenn ISO per anderem Weg bereitgestellt wurde)
 # ---------------------------------------------------------------------------
 - name: "iso | Quell-ISO: existiert sie bereits?"
   ansible.builtin.stat:
@@ -124,7 +98,6 @@
 
 # ---------------------------------------------------------------------------
 # Templates rendern
-# Ab hier sind alle Vars sicher als Host-Facts (Prio 22) verfügbar.
 # ---------------------------------------------------------------------------
 - name: "iso | answer.toml erzeugen ({{ _node_fqdn }})"
   ansible.builtin.template:
