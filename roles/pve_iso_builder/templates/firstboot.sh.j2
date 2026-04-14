@@ -102,10 +102,10 @@ sysctl --system >/dev/null 2>&1
 #   e) bond0 + vmbr0 mit ifup hochbringen
 #   f) DHCP-Interface deaktivieren
 #
-# Konfigurierte bond0-MACs (aus host_vars/<node>.yml – pve_nic_aliases[role=bond0]):
+# bond0-MACs (zur Render-Zeit aus host_vars aufgelöst):
 {% set bond0_nics = pve_nic_aliases | selectattr('role', 'equalto', 'bond0') | list %}
 {% if bond0_nics | length == 0 %}
-# GUARD: Kein bond0-Eintrag in pve_nic_aliases – Script wird mit fail() abbrechen!
+# GUARD: Kein bond0-Eintrag in pve_nic_aliases – Script bricht mit fail() ab!
 {% else %}
 {% for nic in bond0_nics %}
 #   {{ nic.alias }}: {{ nic.mac }}
@@ -114,8 +114,7 @@ sysctl --system >/dev/null 2>&1
 # =============================================================================
 log "Phase 3: Management-Bond bond0 + vmbr0 aufbauen"
 
-# Guard: sicherstellen dass bond0-MACs im Template vorhanden sind
-{% set bond0_nics = pve_nic_aliases | selectattr('role', 'equalto', 'bond0') | list %}
+# Laufzeit-Guard
 {% if bond0_nics | length == 0 %}
 fail "FATAL: pve_nic_aliases enthält keine bond0-Einträge für {{ _node_name }}! Abbruch."
 {% endif %}
@@ -186,6 +185,9 @@ udevadm control --reload-rules
 log "udev-Regeln geschrieben und neu geladen"
 
 # -- 3d: /etc/network/interfaces.d/bond0-vmbr0 schreiben ----------------------
+# WICHTIG: <<'NETCFG' (gequotet) verhindert dass Bash $-Variablen expandiert
+# bevor bond0/vmbr0 hochgebracht wurden. Jinja2-Ausdruecke {{ }} werden
+# zur Template-Render-Zeit aufgeloest (vor Bash-Ausfuehrung) - das ist korrekt.
 log "Netzwerkkonfiguration schreiben: /etc/network/interfaces.d/bond0-vmbr0"
 mkdir -p /etc/network/interfaces.d
 
@@ -195,7 +197,8 @@ grep -q 'source /etc/network/interfaces.d/\*' /etc/network/interfaces || \
 DHCP_IFACE=$(awk '/^iface .* inet dhcp/{print $2; exit}' /etc/network/interfaces || true)
 log "Vom Installer angelegte DHCP-Schnittstelle: ${DHCP_IFACE:-keine gefunden}"
 
-cat > /etc/network/interfaces.d/bond0-vmbr0 <<NETCFG
+# FIX: <<'NETCFG' statt <<NETCFG - verhindert vorzeitige $-Expansion durch Bash
+cat > /etc/network/interfaces.d/bond0-vmbr0 <<'NETCFG'
 # =============================================================================
 # bond0 - Management + Corosync (LACP fast)
 # Generiert durch PVE firstboot.sh
@@ -205,17 +208,17 @@ cat > /etc/network/interfaces.d/bond0-vmbr0 <<NETCFG
 {% endfor %}
 # =============================================================================
 
-\$(for slave in "\${BOND0_SLAVES[@]}"; do
+$(for slave in "${BOND0_SLAVES[@]}"; do
     cat <<EOF
-auto \$slave
-iface \$slave inet manual
+auto $slave
+iface $slave inet manual
     bond-master bond0
 
 EOF
 done)
 auto bond0
 iface bond0 inet manual
-    bond-slaves     \${BOND0_SLAVES[*]}
+    bond-slaves     ${BOND0_SLAVES[*]}
     bond-mode       802.3ad
     bond-xmit-hash-policy layer3+4
     bond-lacp-rate  fast
@@ -278,9 +281,11 @@ log "=== Phase 3 abgeschlossen: bond0/vmbr0 auf {{ pve_node_ip }}/{{ pve_node_ci
 log "Phase 4: Basis-Pakete installieren"
 wait_for_apt
 DEBIAN_FRONTEND=noninteractive apt-get update -qq
+# FIX: ethtool-Zeile bekommt expliziten Backslash damit der
+#      pve_extra_packages-Loop (auch wenn leer) korrekt angehaengt wird
 DEBIAN_FRONTEND=noninteractive apt-get install -y \
     ifenslave \
-    ethtool  \
+    ethtool \
 {% for pkg in pve_extra_packages | default(['lldpd']) %}
     {{ pkg }}{% if not loop.last %} \{% endif %}
 
