@@ -1,54 +1,126 @@
 ---
 # =============================================================================
-# group_vars/all.yml – Globale Einstellungen für alle Hosts
+# group_vars/all.yml – Globaler Fallback für ALLE Hosts (Ansible Prio 8)
+#
+# VARIABLEN-HIERARCHIE (höhere Prio überschreibt niedrigere):
+#
+#   Prio  2  roles/*/defaults/main.yml     → FAIL-Guard / technischer Minimalwert
+#   Prio  8  group_vars/all.yml            → globaler Fallback  ← DIESE DATEI
+#   Prio 10  group_vars/proxmox_nodes.yml  → Typ-Default (alle PVE-Nodes)
+#   Prio 12  group_vars/pve_cluster_*.yml  → Cluster-spezifisch
+#   Prio 12  host_vars/<hostname>.yml      → Node-spezifisch (höchste Prio)
+#
+# REGEL: Hier stehen sichere Defaults. Alles Cluster- oder Node-spezifische
+#        gehört in die jeweilige group_vars/pve_cluster_*.yml oder host_vars/.
+#
+# VAULT: Sensible Werte (Passwörter, Keys) per ansible-vault verschlüsseln.
+#        ansible-vault encrypt_string '<wert>' --name '<var>'
 # =============================================================================
 
-# -- Locale / Timezone --------------------------------------------------------
+# -----------------------------------------------------------------------------
+# LOCALE / TIMEZONE
+# Überschreibbar in: group_vars/pve_cluster_*.yml, host_vars/
+# -----------------------------------------------------------------------------
 pve_timezone: "Europe/Berlin"
 pve_keyboard: "de"
 pve_country:  "de"
 pve_mailto:   "admin@example.local"
 
-# -- Credentials (Produktion: ansible-vault!) ----------------------------------
-# Generieren mit: mkpasswd --method=yescrypt
+# -----------------------------------------------------------------------------
+# CREDENTIALS  ← PFLICHT: Vor Produktionseinsatz mit ansible-vault sichern!
+# Überschreibbar in: group_vars/pve_cluster_*.yml (cluster-eigener Key/Hash)
+#
+# Hash erzeugen: mkpasswd --method=yescrypt
+# Vault:         ansible-vault encrypt_string '$y$j9T$...' --name pve_root_password_hashed
+# -----------------------------------------------------------------------------
 pve_root_password_hashed: "$y$j9T$CHANGEME_USE_MKPASSWD$CHANGEME"
 pve_root_ssh_keys:
   - "ssh-ed25519 AAAAC3... admin@workstation"
 
-# -- ISO-Quelle ----------------------------------------------------------------
-pve_iso_url:             "https://enterprise.proxmox.com/iso/proxmox-ve_9.1-1.iso"
-pve_iso_filename:        "proxmox-ve_9.1-1.iso"
-pve_iso_output_dir:      "/tmp/pve-iso-build"
-pve_iso_output_filename: "proxmox-ve_9.1-1_unattended.iso"
-
-# -- Netzwerk (Installer) ------------------------------------------------------
-# from-dhcp: FQDN aus DHCP Option 12; from-answer: statische Config
-pve_network_source: "from-dhcp"
-
-# -- Disk-Setup ----------------------------------------------------------------
-# Node-spezifisch in host_vars überschreibbar
-pve_disk_filesystem:   "zfs"
-pve_disk_zfs_raid:     "raid1"
-pve_disk_zfs_ashift:   12
-pve_disk_zfs_compress: "lz4"
-pve_disk_zfs_arc_max:  4096        # MiB
-pve_disk_filter_key:   "ID_MODEL"
-pve_disk_filter_value: "Samsung*"
-# Alternativ explizite Liste (in host_vars setzen):
-# pve_disk_list: ["sda", "sdb"]
-
-# -- First-Boot ----------------------------------------------------------------
-# fully-up | network-online | before-network
-pve_first_boot_ordering: "fully-up"
-pve_reboot_mode:         "reboot"
-pve_reboot_on_error:     false
-
-# -- Post-Install Webhook (optional) ------------------------------------------
-pve_webhook_url: ""
-
-# -- PVE API-Credentials -------------------------------------------------------
-# Produktion: ansible-vault encrypt_string verwenden!
+# Proxmox Web-API (für 02_base_setup.yml)
+# Vault: ansible-vault encrypt_string 'secret' --name pve_api_password
 pve_api_port:           8006
 pve_api_user:           "root@pam"
 pve_api_password:       "CHANGEME"
 pve_api_validate_certs: false
+
+# -----------------------------------------------------------------------------
+# ISO-QUELLE
+# Überschreibbar in: group_vars/pve_cluster_*.yml (cluster nutzt andere PVE-Version)
+# -----------------------------------------------------------------------------
+pve_iso_url:             "https://enterprise.proxmox.com/iso/proxmox-ve_9.1-1.iso"
+pve_iso_filename:        "proxmox-ve_9.1-1.iso"
+pve_iso_output_dir:      "/tmp/pve-iso-build"
+pve_iso_output_filename: "proxmox-ve_unattended.iso"   # wird pro Node überschrieben
+pve_iso_download:        true
+pve_iso_validate_answer: true
+pve_answer_fetch_from:   "iso"   # iso | partition | http
+
+# -----------------------------------------------------------------------------
+# DISK-SETUP
+# Überschreibbar in: group_vars/pve_cluster_*.yml, host_vars/<node>.yml
+#
+# HIERARCHIE für pve_disk_list:
+#   1. host_vars/<node>.yml          → Node hat abweichende Disk(s)
+#   2. group_vars/pve_cluster_*.yml  → Cluster-Norm (z. B. alle NVMe)
+#   3. group_vars/proxmox_nodes.yml  → Typ-Default alle PVE-Nodes
+#   4. group_vars/all.yml            → globaler Fallback ← HIER
+#
+# WICHTIG: pve_disk_list: [] würde den Installer zum Absturz bringen!
+#          Dieser Wert muss immer eine nicht-leere Liste sein.
+#          Der FAIL-Guard in roles/pve_iso_builder/tasks/main.yml
+#          prüft dies und bricht mit Klartextfehler ab.
+# -----------------------------------------------------------------------------
+pve_disk_filesystem:   "zfs"
+pve_disk_zfs_raid:     "mirror"       # mirror | raidz | raidz2 | raidz3 | raid0 | raid10
+pve_disk_zfs_ashift:   12             # 12 = 4K (SAS/SATA SSD), 13 = 8K (NVMe empfohlen)
+pve_disk_zfs_compress: "lz4"          # lz4 | zstd | gzip | off
+pve_disk_zfs_arc_max:  4096           # MiB; 0 = automatisch (RAM/2)
+
+# LVM-spezifisch (nur wenn pve_disk_filesystem: ext4 oder xfs)
+pve_disk_lvm_swapsize: 8              # GiB
+pve_disk_lvm_maxvz:    0              # GiB; 0 = restlicher Platz
+
+# btrfs-spezifisch
+pve_disk_btrfs_raid:     "raid1"      # raid0 | raid1 | raid10
+pve_disk_btrfs_compress: "zstd"       # zstd | lzo | none
+
+# Disk-Auswahl: explizite Liste (empfohlen) ODER Filter
+# Explizite Liste hat Vorrang vor Filter – siehe answer.toml.j2
+pve_disk_list:
+  - "sda"
+  - "sdb"
+
+# Filter-Fallback (greift nur wenn pve_disk_list leer – durch FAIL-Guard verhindert)
+pve_disk_filter_key:   "ID_MODEL"     # udev-Attribut: ID_MODEL | ID_VENDOR | ID_SERIAL | ID_PATH
+pve_disk_filter_value: "CHANGEME_SET_IN_CLUSTER"  # Glob, z. B. "Samsung*" oder "SAMSUNG*"
+
+# -----------------------------------------------------------------------------
+# INSTALLER-VERHALTEN
+# Überschreibbar in: group_vars/pve_cluster_*.yml
+# -----------------------------------------------------------------------------
+pve_first_boot_ordering: "fully-up"  # fully-up | network-online | before-network
+pve_reboot_mode:         "reboot"    # reboot | shutdown
+pve_reboot_on_error:     false
+
+# -----------------------------------------------------------------------------
+# NETZWERK – INSTALLER-PHASE (answer.toml)
+# Stufe 1: from-dhcp – firstboot.sh baut danach bond0/vmbr0 statisch auf
+# Überschreibbar in: group_vars/pve_cluster_*.yml (nur in Sonderfällen)
+# -----------------------------------------------------------------------------
+pve_network_source: "from-dhcp"
+
+# -----------------------------------------------------------------------------
+# POST-INSTALL WEBHOOK (optional)
+# Überschreibbar in: group_vars/pve_cluster_*.yml, host_vars/
+# Leer = kein Webhook-Block in answer.toml
+# -----------------------------------------------------------------------------
+pve_webhook_url: ""
+
+# -----------------------------------------------------------------------------
+# PROXMOX SUBSCRIPTION
+# false → No-Subscription-Repo aktiv, Enterprise-Repo deaktiviert
+# true  → Enterprise-Repos bleiben aktiv (Subscription-Key erforderlich)
+# Überschreibbar in: group_vars/pve_cluster_*.yml, host_vars/
+# -----------------------------------------------------------------------------
+pve_use_subscription: false
