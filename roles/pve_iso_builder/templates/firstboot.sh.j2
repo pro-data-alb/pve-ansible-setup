@@ -4,24 +4,23 @@
 # Systemd-Service: proxmox-first-boot.service
 # Log:             /var/log/pve-firstboot.log
 #
-# Phasen:
-#   1. APT-Repos anpassen (no-subscription)
-#   2. Basis-Pakete installieren (lldpd, ethtool, ...)
-#   3. System haerten (SSH, sysctl, Subscription-Popup)
-#   4. Management-Bond (bond0 + vmbr0) via MAC-Adressen aufbauen
-#      - MACs werden in host_vars/<node>.yml unter pve_nic_aliases[role=bond0]
-#        hinterlegt und hier via /sys/class/net aufgeloest
-#      - udev-Regeln fuer stabile Interfacenamen werden geschrieben
-#      - bond0 (LACP fast) + vmbr0 (Management-IP) werden gebaut
-#      - DHCP-Interface wird danach deaktiviert
-#      => Nach Reboot ist der Node per SSH auf pve_node_ip erreichbar
-#      => Ansible kann danach den Rest (bond1, bond2, Cluster, ...) uebernehmen
+# Phasen (Reihenfolge ist zwingend – APT braucht Netzwerk!):
+#   1. APT-Repo-Dateien umschreiben       (nur Disk-Ops, kein Netz nötig)
+#   2. System härten: SSH + sysctl        (nur Disk-Ops, kein Netz nötig)
+#   3. Management-Bond (bond0 + vmbr0)    (Netzwerk HERSTELLEN)
+#      - MACs aus pve_nic_aliases[role=bond0] via /sys/class/net auflösen
+#      - udev-Regeln für stabile Interfacenamen schreiben
+#      - bond0 (LACP fast) + vmbr0 (statische Mgmt-IP) aufbauen
+#      - DHCP-Interface deaktivieren
+#      => Node erreichbar auf {{ pve_node_ip }}
+#   4. APT update + Pakete installieren   (Netz MUSS vorher stehen!)
+#   5. Post-Network: lldpd, NTP, Subscription-Popup
 #
-# HINWEIS:
-#   Der PVE-Installer benoetigt ein lauffaehiges Netzwerk-Interface.
-#   Daher wird im answer.toml 'source = "from-dhcp"' verwendet.
-#   Der Installer bringt genau eine NIC per DHCP hoch (erste erkannte).
-#   Dieser firstboot.sh-Hook baut danach den korrekten Bond auf.
+# WICHTIG:
+#   Der PVE-Installer nutzt answer.toml: source="from-dhcp".
+#   Er bringt genau eine NIC per DHCP hoch – dieser Lease wird in Phase 3
+#   abgebaut und durch bond0/vmbr0 ersetzt.
+#   APT in Phase 1/2 würde ohne Netzwerk scheitern!
 # =============================================================================
 set -euo pipefail
 exec > >(tee -a /var/log/pve-firstboot.log) 2>&1
@@ -40,7 +39,7 @@ wait_for_apt() {
 }
 
 # =============================================================================
-# Phase 1: APT-Repos
+# Phase 1: APT-Repo-Dateien umschreiben (nur Disk – kein Netzwerk nötig)
 # =============================================================================
 {% if not pve_use_subscription %}
 log "Phase 1: Enterprise-Repos deaktivieren, no-subscription aktivieren"
@@ -56,48 +55,14 @@ deb http://deb.debian.org/debian trixie main contrib non-free-firmware
 deb http://deb.debian.org/debian trixie-updates main contrib non-free-firmware
 deb http://security.debian.org/debian-security trixie-security main contrib non-free-firmware
 EOF
+{% else %}
+log "Phase 1: Enterprise-Repos beibehalten (Subscription aktiv)"
 {% endif %}
 
 # =============================================================================
-# Phase 2: Basis-Pakete
+# Phase 2: System härten – SSH + sysctl (nur Disk – kein Netzwerk nötig)
 # =============================================================================
-log "Phase 2: Basis-Pakete installieren"
-wait_for_apt
-DEBIAN_FRONTEND=noninteractive apt-get update -qq
-DEBIAN_FRONTEND=noninteractive apt-get install -y \
-    ifenslave \
-    ethtool  \
-{% for pkg in pve_extra_packages | default(['lldpd']) %}
-    {{ pkg }}{% if not loop.last %} \{% endif %}
-
-{% endfor %}
-
-{% if lldpd_configure | default(true) %}
-log "lldpd konfigurieren"
-mkdir -p /etc/lldpd.d
-cat > /etc/lldpd.d/00-proxmox.conf <<'EOF'
-configure lldp portidsubtype {{ lldpd_port_id_subtype | default('macaddress') }}
-configure system description "{{ lldpd_system_description | default('Proxmox VE Node') }}"
-configure system platform "Proxmox VE"
-configure lldp tx-interval 30
-EOF
-systemctl enable --now lldpd
-{% endif %}
-
-{% if pve_ntp_servers is defined %}
-log "NTP konfigurieren"
-cat > /etc/systemd/timesyncd.conf <<'EOF'
-[Time]
-NTP={{ pve_ntp_servers | join(' ') }}
-FallbackNTP=pool.ntp.org
-EOF
-systemctl restart systemd-timesyncd && timedatectl set-ntp true
-{% endif %}
-
-# =============================================================================
-# Phase 3: System haerten
-# =============================================================================
-log "Phase 3: SSH haerten"
+log "Phase 2: SSH härten"
 declare -A SSH_OPTS=(
   ["PermitRootLogin"]="{{ pve_ssh_permit_root_login | default('prohibit-password') }}"
   ["PasswordAuthentication"]="{{ pve_ssh_password_auth | default('no') }}"
@@ -115,6 +80,7 @@ for key in "${!SSH_OPTS[@]}"; do
 done
 systemctl restart ssh
 
+log "Phase 2: sysctl härten"
 cat > /etc/sysctl.d/99-pve.conf <<'EOF'
 net.ipv4.ip_forward = 1
 net.ipv6.conf.all.forwarding = 1
@@ -124,20 +90,14 @@ kernel.dmesg_restrict = 1
 EOF
 sysctl --system >/dev/null 2>&1
 
-{% if not pve_use_subscription %}
-log "Subscription-Warnung deaktivieren"
-PVEUI="/usr/share/javascript/proxmox-widget-toolkit/proxmoxlib.js"
-[ -f "$PVEUI" ] && cp "$PVEUI" "${PVEUI}.bak" && \
-  sed -i "s/Ext.Msg.show({/void({/g" "$PVEUI" 2>/dev/null || true
-{% endif %}
-
 # =============================================================================
-# Phase 4: Management-Bond (bond0 + vmbr0) via MAC-Adressen aufbauen
+# Phase 3: Management-Bond (bond0 + vmbr0) via MAC-Adressen aufbauen
+#          => Netzwerk wird hier erst hergestellt!
 #
 # Strategie:
 #   a) Alle NICs und deren MACs via /sys/class/net einlesen
 #   b) Konfigurierte bond0-MACs gegen die gelesenen MACs abgleichen
-#   c) udev-Regeln fuer stabile Interfacenamen schreiben
+#   c) udev-Regeln für stabile Interfacenamen schreiben
 #   d) /etc/network/interfaces.d/bond0-vmbr0 schreiben (LACP fast)
 #   e) bond0 + vmbr0 mit ifup hochbringen
 #   f) DHCP-Interface deaktivieren
@@ -145,28 +105,27 @@ PVEUI="/usr/share/javascript/proxmox-widget-toolkit/proxmoxlib.js"
 # Konfigurierte bond0-MACs (aus host_vars/<node>.yml – pve_nic_aliases[role=bond0]):
 {% set bond0_nics = pve_nic_aliases | selectattr('role', 'equalto', 'bond0') | list %}
 {% if bond0_nics | length == 0 %}
-# GUARD: Kein bond0-Eintrag in pve_nic_aliases – Build wird mit fail() abbrechen!
+# GUARD: Kein bond0-Eintrag in pve_nic_aliases – Script wird mit fail() abbrechen!
 {% else %}
 {% for nic in bond0_nics %}
 #   {{ nic.alias }}: {{ nic.mac }}
 {% endfor %}
 {% endif %}
 # =============================================================================
-log "Phase 4: Management-Bond bond0 + vmbr0 aufbauen"
+log "Phase 3: Management-Bond bond0 + vmbr0 aufbauen"
 
-# Guard: sicherstellen dass bond0-MACs vorhanden sind
+# Guard: sicherstellen dass bond0-MACs im Template vorhanden sind
 {% set bond0_nics = pve_nic_aliases | selectattr('role', 'equalto', 'bond0') | list %}
 {% if bond0_nics | length == 0 %}
-fail "FATAL: pve_nic_aliases enthält keine bond0-Einträge für {{ _node_name }}! ISO-Build abgebrochen."
+fail "FATAL: pve_nic_aliases enthält keine bond0-Einträge für {{ _node_name }}! Abbruch."
 {% endif %}
 
-# -- 4a: MAC -> Interfacename Lookup ------------------------------------------
+# -- 3a: MAC -> Interfacename Lookup ------------------------------------------
 declare -A MAC_TO_IFACE=()
 
 for iface_path in /sys/class/net/*/address; do
     iface=$(basename "$(dirname "$iface_path")")
     mac=$(cat "$iface_path" 2>/dev/null | tr '[:upper:]' '[:lower:]' || true)
-    # Nur physische NICs beruecksichtigen (keine Loopback, keine Bonds, keine VMs)
     [[ "$mac" == "00:00:00:00:00:00" ]] && continue
     [[ "$mac" == "" ]]                   && continue
     [[ "$iface" == "lo" ]]               && continue
@@ -178,7 +137,7 @@ for mac in "${!MAC_TO_IFACE[@]}"; do
     log "  ${MAC_TO_IFACE[$mac]} -> $mac"
 done
 
-# -- 4b: Konfigurierte bond0-MACs auflösen ------------------------------------
+# -- 3b: Konfigurierte bond0-MACs auflösen ------------------------------------
 BOND0_SLAVES=()
 BOND0_ALIASES=()
 
@@ -193,18 +152,15 @@ if [[ -n "${MAC_TO_IFACE[$MAC_LOWER_{{ loop.index }}]:-}" ]]; then
 else
     log "  WARNUNG: MAC {{ nic.mac }} ({{ nic.alias }}) nicht gefunden!"
     log "  Verfuegbare MACs: ${!MAC_TO_IFACE[*]}"
-    # Kein hartes fail hier - bei nur einer NIC vielleicht akzeptabel
-    # Aendern auf fail() wenn Bond zwingend benoetigt wird
 fi
 {% endfor %}
 
-# Mindestens eine Slave-NIC muss gefunden worden sein
 [[ ${#BOND0_SLAVES[@]} -lt 1 ]] && \
     fail "Keine bond0-NIC gefunden! Konfigurierte MACs nicht auf diesem System vorhanden."
 
 log "bond0 Slaves: ${BOND0_SLAVES[*]}"
 
-# -- 4c: Persistente udev-Regeln fuer bond0-Slaves ----------------------------
+# -- 3c: Persistente udev-Regeln für bond0-Slaves -----------------------------
 log "udev-Regeln schreiben: /etc/udev/rules.d/70-pve-nic-aliases.rules"
 mkdir -p /etc/udev/rules.d
 UDEV_RULES_FILE="/etc/udev/rules.d/70-pve-nic-aliases.rules"
@@ -212,7 +168,7 @@ cat > "$UDEV_RULES_FILE" <<'UDEV_HEADER'
 # =============================================================================
 # Autogeneriert durch PVE firstboot.sh - NICHT manuell bearbeiten!
 # Weist NICs stabile Kernel-Namen basierend auf MAC-Adressen zu.
-# Ansible (mac_resolve.yml) erweitert diese Datei spaeter um bond1/bond2.
+# Ansible (mac_resolve.yml) erweitert diese Datei später um bond1/bond2.
 # =============================================================================
 UDEV_HEADER
 
@@ -229,30 +185,26 @@ fi
 udevadm control --reload-rules
 log "udev-Regeln geschrieben und neu geladen"
 
-# -- 4d: /etc/network/interfaces.d/bond0-vmbr0 schreiben ----------------------
+# -- 3d: /etc/network/interfaces.d/bond0-vmbr0 schreiben ----------------------
 log "Netzwerkkonfiguration schreiben: /etc/network/interfaces.d/bond0-vmbr0"
 mkdir -p /etc/network/interfaces.d
 
-# Sicherstellen dass interfaces die .d-Dateien einliest
 grep -q 'source /etc/network/interfaces.d/\*' /etc/network/interfaces || \
     echo 'source /etc/network/interfaces.d/*' >> /etc/network/interfaces
 
-# Bestehende DHCP-Konfiguration vom Installer ermitteln
 DHCP_IFACE=$(awk '/^iface .* inet dhcp/{print $2; exit}' /etc/network/interfaces || true)
 log "Vom Installer angelegte DHCP-Schnittstelle: ${DHCP_IFACE:-keine gefunden}"
 
-# bond0-vmbr0 Konfigurationsdatei
 cat > /etc/network/interfaces.d/bond0-vmbr0 <<NETCFG
 # =============================================================================
 # bond0 - Management + Corosync (LACP fast)
 # Generiert durch PVE firstboot.sh
 # bond0-Slaves (MAC-basiert):
 {% for nic in bond0_nics %}
-# {{ nic.alias }}: {{ nic.mac }}
+#   {{ nic.alias }}: {{ nic.mac }}
 {% endfor %}
 # =============================================================================
 
-# Slave-Interfaces (keine IP, nur "manual")
 \$(for slave in "\${BOND0_SLAVES[@]}"; do
     cat <<EOF
 auto \$slave
@@ -261,7 +213,6 @@ iface \$slave inet manual
 
 EOF
 done)
-# bond0 - LACP 802.3ad, fast rate (PFLICHT fuer Corosync!)
 auto bond0
 iface bond0 inet manual
     bond-slaves     \${BOND0_SLAVES[*]}
@@ -271,7 +222,6 @@ iface bond0 inet manual
     bond-miimon     100
     up ip link set bond0 mtu {{ pve_bond0_mtu | default(1500) }}
 
-# vmbr0 - Management-Bridge
 auto vmbr0
 iface vmbr0 inet static
     address  {{ pve_node_ip }}/{{ pve_node_cidr_prefix }}
@@ -280,31 +230,28 @@ iface vmbr0 inet static
     bridge-ports bond0
     bridge-stp   off
     bridge-fd    0
-    # Corosync: jumbo frames optional (align mit Switch-Konfiguration)
-    # up ip link set vmbr0 mtu 9000
 NETCFG
 
 log "Netzwerkkonfiguration geschrieben"
 
-# -- 4e: DHCP-Interface aus der Haupt-interfaces-Datei auskommentieren --------
+# -- 3e: DHCP-Interface deaktivieren -----------------------------------------
 if [[ -n "${DHCP_IFACE:-}" ]]; then
-    log "DHCP-Interface '${DHCP_IFACE}' in /etc/network/interfaces deaktivieren"
+    log "DHCP-Interface '${DHCP_IFACE}' deaktivieren"
     sed -i "/^auto ${DHCP_IFACE}$/s/^/# /" /etc/network/interfaces
     sed -i "/^iface ${DHCP_IFACE} inet dhcp/s/^/# /" /etc/network/interfaces
 fi
 
-# -- 4f: Bond + Bridge hochbringen -------------------------------------------
-log "bond0-Slaves in promisc-Mode setzen"
+# -- 3f: Bond + Bridge hochbringen --------------------------------------------
+log "bond0-Slaves vorbereiten (flush + down)"
 for slave in "${BOND0_SLAVES[@]}"; do
     ip addr flush dev "$slave" 2>/dev/null || true
-    ip link set "$slave" down 2>/dev/null || true
+    ip link set "$slave" down  2>/dev/null || true
 done
 
 log "bond0 und vmbr0 hochbringen (ifup)"
-ifup bond0    || fail "ifup bond0 fehlgeschlagen"
-ifup vmbr0    || fail "ifup vmbr0 fehlgeschlagen"
+ifup bond0 || fail "ifup bond0 fehlgeschlagen"
+ifup vmbr0 || fail "ifup vmbr0 fehlgeschlagen"
 
-# Kurz warten bis der Bond LACP-Negotiation abgeschlossen hat
 log "Warte auf LACP-Negotiation (max 10s)"
 for i in $(seq 1 10); do
     if ip link show bond0 | grep -q 'state UP'; then
@@ -314,19 +261,64 @@ for i in $(seq 1 10); do
     sleep 1
 done
 
-# Erreichbarkeit des Gateways pruefen
 if ping -c 2 -W 2 "{{ pve_node_gw }}" >/dev/null 2>&1; then
-    log "Gateway {{ pve_node_gw }} erreichbar - Netzwerk OK"
+    log "Gateway {{ pve_node_gw }} erreichbar – Netzwerk OK"
 else
     log "WARNUNG: Gateway {{ pve_node_gw }} nicht erreichbar."
-    log "  Moegliche Ursache: Switch-Port noch nicht im Trunk/LACP-Modus."
+    log "  Mögliche Ursache: Switch-Port noch nicht im Trunk/LACP-Modus."
     log "  Bond0-Status: $(cat /proc/net/bonding/bond0 2>/dev/null | grep 'MII Status' | head -2)"
-    # Kein fail() - LACP braucht manchmal laenger bei bestimmten Switches
 fi
 
-log "=== Phase 4 abgeschlossen: bond0/vmbr0 auf {{ pve_node_ip }}/{{ pve_node_cidr_prefix }} ==="
-log "=== Ansible kann den Node jetzt unter {{ pve_node_ip }} erreichen ==="
-log "=== Naechste Schritte via Ansible: bond1, bond2, Storage-Bridges, Cluster ==="
+log "=== Phase 3 abgeschlossen: bond0/vmbr0 auf {{ pve_node_ip }}/{{ pve_node_cidr_prefix }} ==="
 
-log "=== First-Boot vollstaendig abgeschlossen ==="
+# =============================================================================
+# Phase 4: APT update + Pakete installieren
+#          Netzwerk steht jetzt über vmbr0 ({{ pve_node_ip }}) bereit.
+# =============================================================================
+log "Phase 4: Basis-Pakete installieren"
+wait_for_apt
+DEBIAN_FRONTEND=noninteractive apt-get update -qq
+DEBIAN_FRONTEND=noninteractive apt-get install -y \
+    ifenslave \
+    ethtool  \
+{% for pkg in pve_extra_packages | default(['lldpd']) %}
+    {{ pkg }}{% if not loop.last %} \{% endif %}
+
+{% endfor %}
+
+# =============================================================================
+# Phase 5: Post-Network-Tasks (lldpd, NTP, Subscription-Popup)
+# =============================================================================
+{% if lldpd_configure | default(true) %}
+log "Phase 5: lldpd konfigurieren"
+mkdir -p /etc/lldpd.d
+cat > /etc/lldpd.d/00-proxmox.conf <<'EOF'
+configure lldp portidsubtype {{ lldpd_port_id_subtype | default('macaddress') }}
+configure system description "{{ lldpd_system_description | default('Proxmox VE Node') }}"
+configure system platform "Proxmox VE"
+configure lldp tx-interval 30
+EOF
+systemctl enable --now lldpd
+{% endif %}
+
+{% if pve_ntp_servers is defined %}
+log "Phase 5: NTP konfigurieren"
+cat > /etc/systemd/timesyncd.conf <<'EOF'
+[Time]
+NTP={{ pve_ntp_servers | join(' ') }}
+FallbackNTP=pool.ntp.org
+EOF
+systemctl restart systemd-timesyncd && timedatectl set-ntp true
+{% endif %}
+
+{% if not pve_use_subscription %}
+log "Phase 5: Subscription-Warnung deaktivieren"
+PVEUI="/usr/share/javascript/proxmox-widget-toolkit/proxmoxlib.js"
+[ -f "$PVEUI" ] && cp "$PVEUI" "${PVEUI}.bak" && \
+    sed -i "s/Ext.Msg.show({/void({/g" "$PVEUI" 2>/dev/null || true
+{% endif %}
+
+log "=== Ansible kann den Node jetzt unter {{ pve_node_ip }} erreichen ==="
+log "=== Nächste Schritte via Ansible: bond1, bond2, Storage-Bridges, Cluster ==="
+log "=== First-Boot vollständig abgeschlossen ==="
 touch /var/lib/pve-firstboot-done
