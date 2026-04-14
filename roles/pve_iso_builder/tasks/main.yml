@@ -48,7 +48,7 @@
     pve_iso_output_filename: "{{ pve_iso_output_filename }}"
 
 # ---------------------------------------------------------------------------
-# Arbeitsverzeichnis + Quell-ISO
+# Arbeitsverzeichnis
 # ---------------------------------------------------------------------------
 - name: "iso | Arbeitsverzeichnis anlegen"
   ansible.builtin.file:
@@ -56,22 +56,36 @@
     state: directory
     mode:  "0755"
 
-- name: "iso | Quell-ISO herunterladen"
+# ---------------------------------------------------------------------------
+# Quell-ISO – idempotenter Download
+# Strategie:
+#   1. Erst prüfen ob die ISO bereits lokal vorliegt (stat)
+#   2. Download NUR wenn Datei fehlt – kein Re-Download bei erneutem Run
+#   3. pve_iso_download: false – überspringt Download komplett
+#      (z.B. wenn ISO per anderem Weg bereitgestellt wurde)
+# ---------------------------------------------------------------------------
+- name: "iso | Quell-ISO: existiert sie bereits?"
+  ansible.builtin.stat:
+    path: "{{ pve_iso_output_dir }}/{{ pve_iso_filename }}"
+    get_checksum: false
+  register: _src_iso_stat
+
+- name: "iso | Quell-ISO herunterladen (nur wenn nicht vorhanden)"
   ansible.builtin.get_url:
     url:  "{{ pve_iso_url }}"
     dest: "{{ pve_iso_output_dir }}/{{ pve_iso_filename }}"
     mode: "0644"
-  when: pve_iso_download | bool
-
-- name: "iso | Quell-ISO prüfen"
-  ansible.builtin.stat:
-    path: "{{ pve_iso_output_dir }}/{{ pve_iso_filename }}"
-  register: _iso_stat
+    tmp_dest: "{{ pve_iso_output_dir }}"
+  when:
+    - pve_iso_download | bool
+    - not _src_iso_stat.stat.exists
 
 - name: "iso | Fehler wenn Quell-ISO fehlt"
   ansible.builtin.fail:
-    msg: "Quell-ISO nicht gefunden: {{ pve_iso_output_dir }}/{{ pve_iso_filename }}"
-  when: not _iso_stat.stat.exists
+    msg: >
+      Quell-ISO nicht gefunden: {{ pve_iso_output_dir }}/{{ pve_iso_filename }}
+      Setze pve_iso_download: true oder lege die ISO manuell ab.
+  when: not _src_iso_stat.stat.exists and not (pve_iso_download | bool)
 
 # ---------------------------------------------------------------------------
 # Templates rendern
@@ -106,6 +120,7 @@
 - name: "iso | Output-ISO: Status prüfen"
   ansible.builtin.stat:
     path: "{{ pve_iso_output_dir }}/{{ pve_iso_output_filename }}"
+    get_checksum: false
   register: _iso_out_stat
 
 - name: "iso | Output-ISO entfernen wenn Inputs geändert"
