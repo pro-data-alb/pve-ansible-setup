@@ -1,12 +1,55 @@
 # =============================================================================
 # pve_iso_builder – tasks/main.yml
 #
-# Erwartet folgende Vars (werden vom Playbook-Loop übergeben):
-#   _node_name              – kurzer Hostname, z.B. pd-proxmox04
-#   _node_fqdn              – FQDN, z.B. pd-proxmox04.pro-data.cloud
-#   pve_iso_output_filename – Zieldatei, z.B. proxmox-ve_pd-proxmox04.iso
+# Erwartet folgende Vars (werden vom Playbook-Loop via hostvars[item]
+# übergeben und hier per set_fact als Host-Facts gesetzt):
+#   _node_name              – z.B. pd-proxmox04
+#   _node_fqdn              – z.B. pd-proxmox04.pro-data.cloud
+#   pve_iso_output_filename – z.B. proxmox-ve_pd-proxmox04.iso
+#   pve_node_ip             – Management-IP
+#   pve_nic_aliases         – Liste mit mac/alias/role Einträgen
 # =============================================================================
 
+# ---------------------------------------------------------------------------
+# GUARD + set_fact
+# WARUM set_fact?
+#   include_role vars: setzt Vars nur als transiente Task-Vars (Prio 18).
+#   ansible.builtin.template rendert im Host-Kontext von iso_builder –
+#   dort existieren node-spezifische Vars NICHT als Host-Vars.
+#   set_fact schreibt sie als echte Host-Facts (Prio 22) auf iso_builder
+#   und macht sie damit für alle nachfolgenden Tasks + Templates sicher
+#   sichtbar, unabhängig vom Loop-Scope.
+# ---------------------------------------------------------------------------
+- name: "iso | Guard: pve_nic_aliases darf nicht leer sein"
+  ansible.builtin.assert:
+    that:
+      - pve_nic_aliases | length > 0
+      - pve_node_ip     | length > 0
+      - pve_node_gw     | length > 0
+    fail_msg: >
+      [{{ _node_name }}] pve_nic_aliases / pve_node_ip / pve_node_gw fehlen!
+      Prüfe host_vars/{{ _node_name }}.yml – diese Vars müssen dort definiert sein.
+
+- name: "iso | set_fact: node-Vars als Host-Facts auf iso_builder setzen"
+  ansible.builtin.set_fact:
+    _node_name:           "{{ _node_name }}"
+    _node_fqdn:           "{{ _node_fqdn }}"
+    pve_node_ip:          "{{ pve_node_ip }}"
+    pve_node_cidr_prefix: "{{ pve_node_cidr_prefix }}"
+    pve_node_gw:          "{{ pve_node_gw }}"
+    pve_node_dns:         "{{ pve_node_dns }}"
+    pve_nic_aliases:      "{{ pve_nic_aliases }}"
+    pve_bond1_enabled:    "{{ pve_bond1_enabled }}"
+    pve_bond2_enabled:    "{{ pve_bond2_enabled }}"
+    pve_bond0_mtu:        "{{ pve_bond0_mtu }}"
+    pve_storage_bridges:  "{{ pve_storage_bridges }}"
+    pve_cluster_link1_ip: "{{ pve_cluster_link1_ip }}"
+    pve_disk_list:        "{{ pve_disk_list }}"
+    pve_iso_output_filename: "{{ pve_iso_output_filename }}"
+
+# ---------------------------------------------------------------------------
+# Arbeitsverzeichnis + Quell-ISO
+# ---------------------------------------------------------------------------
 - name: "iso | Arbeitsverzeichnis anlegen"
   ansible.builtin.file:
     path:  "{{ pve_iso_output_dir }}"
@@ -30,6 +73,10 @@
     msg: "Quell-ISO nicht gefunden: {{ pve_iso_output_dir }}/{{ pve_iso_filename }}"
   when: not _iso_stat.stat.exists
 
+# ---------------------------------------------------------------------------
+# Templates rendern
+# Ab hier sind alle Vars als Host-Facts verfügbar (via set_fact oben)
+# ---------------------------------------------------------------------------
 - name: "iso | answer.toml erzeugen ({{ _node_fqdn }})"
   ansible.builtin.template:
     src:  answer.toml.j2
@@ -44,6 +91,9 @@
     mode: "0750"
   register: _firstboot_changed
 
+# ---------------------------------------------------------------------------
+# Validierung + ISO-Build
+# ---------------------------------------------------------------------------
 - name: "iso | answer.toml validieren"
   ansible.builtin.command:
     cmd: >-
@@ -58,7 +108,6 @@
     path: "{{ pve_iso_output_dir }}/{{ pve_iso_output_filename }}"
   register: _iso_out_stat
 
-# Idempotenz: Output-ISO entfernen wenn Inputs geändert haben
 - name: "iso | Output-ISO entfernen wenn Inputs geändert"
   ansible.builtin.file:
     path:  "{{ pve_iso_output_dir }}/{{ pve_iso_output_filename }}"
