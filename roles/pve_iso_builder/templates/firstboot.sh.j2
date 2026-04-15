@@ -4,7 +4,7 @@
 # Systemd-Service: proxmox-first-boot.service
 # Log:             /var/log/pve-firstboot.log
 #
-# Phasen (Reihenfolge ist zwingend - APT braucht Netzwerk!):
+# Phasen:
 #   1. APT-Repo-Dateien umschreiben       (nur Disk-Ops, kein Netz noetig)
 #   2. System haerten: SSH + sysctl       (nur Disk-Ops, kein Netz noetig)
 #   3. Management-Bond (bond0 + vmbr0)    (Netzwerk HERSTELLEN)
@@ -13,8 +13,12 @@
 #      - bond0 (LACP fast) + vmbr0 (statische Mgmt-IP) aufbauen
 #      - DHCP-Interface deaktivieren
 #      => Node erreichbar auf {{ pve_node_ip }}
-#   4. APT update + Pakete installieren   (Netz MUSS vorher stehen!)
-#   5. Post-Network: lldpd, NTP, Subscription-Popup
+#   4. Post-Install: NTP-Config, Subscription-Popup (nur Disk-Ops)
+#
+# HINWEIS: Kein apt-get install im firstboot!
+#   Das DHCP-Interface hat ggf. kein Internet. Pakete (ifenslave, ethtool,
+#   lldpd, ...) werden nach dem ersten Reboot durch Ansible installiert,
+#   wenn der Node per Bond/vmbr0 erreichbar ist.
 #
 # Render-Zeit vs. Laufzeit:
 #   {# Jinja2: {{ var }} / {% if %} #}  -> wird von Ansible beim ISO-Build aufgeloest
@@ -22,7 +26,6 @@
 #
 # Fehlerbehandlung Netzwerk:
 #   Bond/Bridge-Fehler brechen das Script NICHT ab (nur WARNUNG im Log).
-#   Phase 4+5 laufen immer durch - APT kann ggf. noch ueber DHCP-Interface arbeiten.
 #   Konfiguration wird trotzdem geschrieben; nach manuellem Fix genuegt: ifup bond0 vmbr0
 # =============================================================================
 {% raw %}
@@ -34,19 +37,6 @@ warn() { echo "[firstboot $(date '+%H:%M:%S')] WARNUNG: $*"; }
 fail() { echo "[firstboot $(date '+%H:%M:%S')] FEHLER: $*" >&2; exit 1; }
 
 log "=== Start (ordering: ${1:-unknown}) ==="
-
-wait_for_apt() {
-    local retries=30
-    while flock -n /var/lib/dpkg/lock-frontend true 2>/dev/null; do
-        sleep 0
-        break
-    done
-    while ! flock -n /var/lib/dpkg/lock-frontend true 2>/dev/null; do
-        (( retries-- <= 0 )) && fail "APT-Lock Timeout nach 90s"
-        log "  APT-Lock belegt, warte 3s (${retries} Versuche verbleibend)..."
-        sleep 3
-    done
-}
 {% endraw %}
 
 # =============================================================================
@@ -162,7 +152,7 @@ fi
 {% raw %}
 if [[ ${#BOND0_SLAVES[@]} -lt 1 ]]; then
     warn "Keine bond0-NIC gefunden! Konfigurierte MACs nicht auf diesem System."
-    warn "Netzwerk-Konfiguration wird NICHT geschrieben. Phase 4+5 laufen weiter."
+    warn "Netzwerk-Konfiguration wird NICHT geschrieben."
     BOND_SETUP_FAILED=1
 else
     BOND_SETUP_FAILED=0
@@ -190,7 +180,7 @@ fi
 {% raw %}
 udevadm control --reload-rules
 log "udev-Regeln geschrieben und neu geladen"
-fi  # end BOND_SETUP_FAILED check
+fi  # end BOND_SETUP_FAILED check (3c)
 {% endraw %}
 
 # -- 3d: /etc/network/interfaces.d/bond0-vmbr0 schreiben ----------------------
@@ -285,46 +275,17 @@ fi
 {% raw %}
 else
     warn "=== Phase 3 uebersprungen (keine NICs gefunden) - Netzwerk manuell konfigurieren! ==="
-fi  # end BOND_SETUP_FAILED check
+fi  # end BOND_SETUP_FAILED check (3d-3f)
 
 {% endraw %}
 log "=== Phase 3 abgeschlossen: bond0/vmbr0 auf {{ pve_node_ip }}/{{ pve_node_cidr_prefix }} ==="
 
 # =============================================================================
-# Phase 4: APT update + Pakete installieren
+# Phase 4: Post-Install Disk-Ops (kein Netzwerk noetig)
 # =============================================================================
-{% raw %}
-log "Phase 4: Basis-Pakete installieren"
-wait_for_apt
-DEBIAN_FRONTEND=noninteractive apt-get update -qq
-DEBIAN_FRONTEND=noninteractive apt-get install -y \
-    ifenslave \
-    ethtool \
-{% endraw %}
-    {{ (pve_extra_packages | default(['lldpd'])) | join(' \\\n    ') }}
-
-# =============================================================================
-# Phase 5: Post-Network-Tasks
-# =============================================================================
-{% if lldpd_configure | default(true) %}
-{% raw %}
-log "Phase 5: lldpd konfigurieren"
-mkdir -p /etc/lldpd.d
-cat > /etc/lldpd.d/00-proxmox.conf <<'EOF'
-{% endraw %}
-configure lldp portidsubtype {{ lldpd_port_id_subtype | default('macaddress') }}
-configure system description "{{ lldpd_system_description | default('Proxmox VE Node') }}"
-configure system platform "Proxmox VE"
-configure lldp tx-interval 30
-EOF
-{% raw %}
-systemctl enable --now lldpd
-{% endraw %}
-{% endif %}
-
 {% if pve_ntp_servers | default([]) | length > 0 %}
 {% raw %}
-log "Phase 5: NTP konfigurieren"
+log "Phase 4: NTP konfigurieren"
 cat > /etc/systemd/timesyncd.conf <<'EOF'
 [Time]
 {% endraw %}
@@ -338,14 +299,14 @@ systemctl restart systemd-timesyncd && timedatectl set-ntp true
 
 {% if not pve_use_subscription %}
 {% raw %}
-log "Phase 5: Subscription-Warnung deaktivieren"
+log "Phase 4: Subscription-Warnung deaktivieren"
 PVEUI="/usr/share/javascript/proxmox-widget-toolkit/proxmoxlib.js"
 [ -f "$PVEUI" ] && cp "$PVEUI" "${PVEUI}.bak" && \
     sed -i "s/Ext.Msg.show({/void({/g" "$PVEUI" 2>/dev/null || true
 {% endraw %}
 {% endif %}
 
-log "=== Ansible kann den Node jetzt unter {{ pve_node_ip }} erreichen ==="
+log "=== Ansible kann den Node nach Reboot unter {{ pve_node_ip }} erreichen ==="
 log "=== First-Boot vollstaendig abgeschlossen ==="
 {% raw %}
 touch /var/lib/pve-firstboot-done
