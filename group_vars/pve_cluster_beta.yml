@@ -1,0 +1,43 @@
+---
+# =============================================================================
+# group_vars/pve_cluster_beta.yml – Cluster-spezifisch (Ansible Prio 12)
+#
+# Gilt für alle Hosts in der Gruppe 'pve_cluster_beta'.
+#
+# VARIABLEN-HIERARCHIE:
+#   Überschreibt:  group_vars/proxmox_nodes.yml (Prio 10)
+#                  group_vars/all.yml           (Prio  8)
+#   Überschrieben durch: host_vars/<hostname>.yml
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# CLUSTER-IDENTITÄT
+# -----------------------------------------------------------------------------
+pve_cluster_name: "beta"
+pve_domain:       "beta.proxmox.local"
+
+# -----------------------------------------------------------------------------
+# DISK-SETUP – Cluster-Norm
+# Cluster beta: Single-Disk-Nodes (z. B. Test-/Dev-Cluster)
+# In host_vars/<node>.yml überschreiben wenn ein Node abweicht.
+# -----------------------------------------------------------------------------
+pve_disk_list:
+  - "sda"
+
+pve_disk_filesystem:   "zfs"
+pve_disk_zfs_raid:     "mirror"   # mirror erfordert mind. 2 Disks!
+                                  # → Für Single-Disk auf "raid0" ändern
+pve_disk_zfs_ashift:   12
+pve_disk_zfs_compress: "lz4"
+pve_disk_zfs_arc_max:  2048   # MiB – kleinere Nodes
+
+# -----------------------------------------------------------------------------
+# INSTALLER
+# -----------------------------------------------------------------------------
+pve_reboot_on_error: false
+
+# -----------------------------------------------------------------------------
+# NTP – Standort-spezifisch (optional)
+# pve_ntp_servers:
+#   - "ntp.beta.proxmox.local"
+# -----------------------------------------------------------------------------

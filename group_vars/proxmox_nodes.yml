@@ -1,13 +1,45 @@
 ---
 # =============================================================================
-# group_vars/proxmox_nodes.yml – Gilt für alle PVE-Nodes
-# Node-spezifische Werte (MACs, IPs) → host_vars/<hostname>.yml
+# group_vars/proxmox_nodes.yml – Typ-Default für ALLE PVE-Nodes (Ansible Prio 10)
+#
+# Gilt für alle Hosts in der Gruppe 'proxmox_nodes' und deren Kind-Gruppen
+# (pve_cluster_alpha, pve_cluster_beta, pve_cluster_pdcloudcust, …).
+#
+# VARIABLEN-HIERARCHIE:
+#   Überschreibt:  group_vars/all.yml (Prio 8)
+#   Überschrieben durch: group_vars/pve_cluster_*.yml (Prio 12)
+#                         host_vars/<hostname>.yml    (Prio 12)
+#
+# REGEL: Hier stehen Werte, die für JEDEN PVE-Node-Typ gelten,
+#        aber cluster- oder node-spezifisch überschrieben werden können.
 # =============================================================================
 
-# -- APT -----------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# DISK-SETUP – Typ-Default für alle PVE-Nodes
+# Überschreibbar in: group_vars/pve_cluster_*.yml, host_vars/<node>.yml
+#
+# Dieser Wert MUSS eine nicht-leere Liste sein – der FAIL-Guard in
+# roles/pve_iso_builder/tasks/main.yml prüft dies vor dem ISO-Bau.
+# -----------------------------------------------------------------------------
+pve_disk_list:
+  - "sda"
+  - "sdb"
+
+pve_disk_filesystem:   "zfs"
+pve_disk_zfs_raid:     "mirror"
+pve_disk_zfs_ashift:   12
+pve_disk_zfs_compress: "lz4"
+
+# -----------------------------------------------------------------------------
+# APT / SUBSCRIPTION
+# Überschreibbar in: group_vars/pve_cluster_*.yml, host_vars/
+# -----------------------------------------------------------------------------
 pve_use_subscription: false
 
-# -- Pakete --------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# PAKETE
+# Überschreibbar in: group_vars/pve_cluster_*.yml (andere Paketliste pro Cluster)
+# -----------------------------------------------------------------------------
 pve_extra_packages:
   - lldpd
   - vim
@@ -19,83 +51,87 @@ pve_extra_packages:
   - tcpdump
   - ethtool
   - iperf3
-  - python3-expect     # benötigt für pvecm add (ansible.builtin.expect)
+  - python3-expect   # benötigt für pvecm add (ansible.builtin.expect)
 
-# -- lldpd ---------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# LLDPD
+# Überschreibbar in: group_vars/pve_cluster_*.yml, host_vars/
+# -----------------------------------------------------------------------------
 lldpd_configure:          true
 lldpd_system_description: "Proxmox VE Node"
 lldpd_port_id_subtype:    "macaddress"   # macaddress | ifname
 
-# -- NTP -----------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# NTP
+# Überschreibbar in: group_vars/pve_cluster_*.yml (andere NTP-Server pro Standort)
+# -----------------------------------------------------------------------------
 pve_ntp_servers:
   - "0.de.pool.ntp.org"
   - "1.de.pool.ntp.org"
   - "2.de.pool.ntp.org"
 
-# -- SSH -----------------------------------------------------------------------
-pve_ssh_permit_root_login: "prohibit-password"
-pve_ssh_password_auth:     "no"
+# -----------------------------------------------------------------------------
+# SSH-HÄRTUNG
+# Überschreibbar in: group_vars/pve_cluster_*.yml, host_vars/
+# -----------------------------------------------------------------------------
+pve_ssh_permit_root_login: "prohibit-password"   # prohibit-password | yes | no
+pve_ssh_password_auth:     "no"                  # yes | no
 
-# =============================================================================
-# NIC-Alias / MAC-Resolution
-#
-# pve_nic_aliases wird in host_vars/<node>.yml pro Node definiert.
-# Dort werden die MAC-Adressen der NICs eingetragen (aus IPMI/LLDP).
-# mac_resolve.yml löst MACs → Kernel-Interfacenamen auf.
-#
-# pve_nic_udev_rules: true
-#   → Schreibt persistente udev-Regeln nach /etc/udev/rules.d/
-#   → Stabile Interfacenamen nach Reboots
-#   → Datei: /etc/udev/rules.d/70-pve-nic-aliases.rules
-# =============================================================================
+# -----------------------------------------------------------------------------
+# NIC / UDEV
+# pve_nic_aliases: NUR in host_vars/<node>.yml definieren (MAC-spezifisch)!
+# Überschreibbar in: host_vars/ (PFLICHT – kein sinnvoller Global-Default möglich)
+# -----------------------------------------------------------------------------
 pve_nic_udev_rules: true
 
-# =============================================================================
-# Netzwerk – Bond/Bridge Defaults
+# -----------------------------------------------------------------------------
+# NETZWERK – BOND/BRIDGE DEFAULTS
 #
 # KRITISCH: bond_lacp_rate MUSS "fast" sein wenn Bonds für Corosync genutzt
 # werden – sonst 90s Failover → HA-Fencing vor Link-Erkennung!
-# Slow (default) = LACPDU alle 30s → Failover 90s → Fencing nach ~60s
-# Fast           = LACPDU jede  1s → Failover  3s → kein ungewolltes Fencing
 # Quelle: https://pve.proxmox.com/wiki/Cluster_Manager#pvecm_corosync_over_bonds
-# WICHTIG: Auch am Switch LACP fast rate aktivieren!
-# =============================================================================
+# Switch-Ports ebenfalls auf LACP fast konfigurieren!
+#
+# Überschreibbar in: group_vars/pve_cluster_*.yml, host_vars/
+# -----------------------------------------------------------------------------
 
-# -- bond0 – Management + Corosync --------------------------------------------
+# bond0 – Management + Corosync
 pve_bond0_name:             "bond0"
 pve_bond0_mode:             "802.3ad"
 pve_bond0_xmit_hash_policy: "layer3+4"
 pve_bond0_lacp_rate:        "fast"   # PFLICHT für Corosync-Bonds!
 pve_bond0_miimon:           100
+pve_bond0_mtu:              1500
 
-# -- bond1 – Storage (NFS / iSCSI) --------------------------------------------
+# bond1 – Storage (NFS / iSCSI)
 pve_bond1_name:             "bond1"
 pve_bond1_mode:             "802.3ad"
 pve_bond1_xmit_hash_policy: "layer3+4"
 pve_bond1_lacp_rate:        "fast"
 pve_bond1_miimon:           100
-pve_bond1_enabled:          false    # Override in host_vars auf true
+pve_bond1_enabled:          false   # Override in host_vars/ auf true
 
-# -- bond2 – VM-Traffic / SDN VLAN-aware --------------------------------------
+# bond2 – VM-Traffic / SDN VLAN-aware
 pve_bond2_name:             "bond2"
 pve_bond2_mode:             "802.3ad"
 pve_bond2_xmit_hash_policy: "layer3+4"
 pve_bond2_lacp_rate:        "fast"
 pve_bond2_miimon:           100
-pve_bond2_enabled:          false    # Override in host_vars auf true
+pve_bond2_enabled:          false   # Override in host_vars/ auf true
 
-# -- Management-Bridge vmbr0 --------------------------------------------------
-pve_mgmt_bridge:      "vmbr0"
-pve_mgmt_bridge_stp:  "off"
-pve_mgmt_bridge_fd:   0
+# Management-Bridge vmbr0
+pve_mgmt_bridge:     "vmbr0"
+pve_mgmt_bridge_stp: "off"
+pve_mgmt_bridge_fd:  0
 
-# -- VM-Traffic-Bridge (SDN VLAN-aware) ---------------------------------------
+# VM-Traffic-Bridge (SDN VLAN-aware)
 pve_data_bridge:      "vmbrData"
 pve_data_bridge_vlan: true
 
-# =============================================================================
-# Proxmox SDN
-# =============================================================================
+# -----------------------------------------------------------------------------
+# PROXMOX SDN
+# Überschreibbar in: group_vars/pve_cluster_*.yml (jeder Cluster eigenes SDN)
+# -----------------------------------------------------------------------------
 pve_sdn_enabled:   true
 pve_sdn_zone_id:   "vxlan01"
 pve_sdn_zone_type: "vxlan"

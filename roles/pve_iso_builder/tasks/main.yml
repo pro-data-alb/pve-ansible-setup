@@ -5,14 +5,6 @@
 # ---------------------------------------------------------------------------
 # STEP 1: Vars aus include_role vars: (Prio 18) als Host-Facts (Prio 22)
 #         auf iso_builder fixieren – VOR Guard und VOR Template-Rendering!
-#
-#         cacheable: false via args: übergeben – das ist die einzig korrekte
-#         Syntax um set_fact-Modul-Parameter neben den gesetzten Vars zu nutzen:
-#
-#           ansible.builtin.set_fact:
-#             myvar: myval
-#           args:
-#             cacheable: false
 # ---------------------------------------------------------------------------
 - name: "iso | set_fact: node-Vars als Host-Facts auf iso_builder fixieren"
   ansible.builtin.set_fact:
@@ -34,8 +26,28 @@
     cacheable: false
 
 # ---------------------------------------------------------------------------
-# STEP 2: Guard
+# STEP 2: Guard – Pflicht-Vars + FAIL-Guard für pve_disk_list
 # ---------------------------------------------------------------------------
+- name: "iso | Guard: pve_disk_list darf nicht leer oder FAIL-Guard-Wert sein"
+  ansible.builtin.assert:
+    that:
+      - pve_disk_list != "__UNDEFINED__"
+      - pve_disk_list | list | length > 0
+    fail_msg: >
+      [{{ _node_name }}] pve_disk_list ist nicht gesetzt oder leer!
+      Die ISO-Installation würde ohne Disk-Angabe scheitern.
+
+      Setze pve_disk_list in einer der folgenden Dateien (höchste Prio zuerst):
+        1. host_vars/{{ _node_name }}.yml          (node-spezifisch)
+        2. group_vars/pve_cluster_<name>.yml       (cluster-weit)
+        3. group_vars/proxmox_nodes.yml            (alle PVE-Nodes)
+        4. group_vars/all.yml                      (globaler Fallback)
+
+      Beispiel:
+        pve_disk_list:
+          - "sda"
+          - "sdb"
+
 - name: "iso | Guard: Pflicht-Vars vollständig und bond0-MACs vorhanden?"
   ansible.builtin.assert:
     that:
@@ -51,13 +63,11 @@
 # ---------------------------------------------------------------------------
 # STEP 3: Debug-Ausgabe
 # ---------------------------------------------------------------------------
-- name: "iso | Debug: bond0-MACs für {{ _node_name }}"
+- name: "iso | Debug: bond0-MACs + Disks für {{ _node_name }}"
   ansible.builtin.debug:
-    msg: >-
-      [{{ _node_name }}] bond0-MACs ins firstboot.sh:
-      {{ pve_nic_aliases
-         | selectattr('role', 'equalto', 'bond0')
-         | map(attribute='mac') | list | join(', ') }}
+    msg:
+      - "[{{ _node_name }}] bond0-MACs: {{ pve_nic_aliases | selectattr('role', 'equalto', 'bond0') | map(attribute='mac') | list | join(', ') }}"
+      - "[{{ _node_name }}] disk-list:  {{ pve_disk_list | join(', ') }}"
 
 # ---------------------------------------------------------------------------
 # Arbeitsverzeichnis
