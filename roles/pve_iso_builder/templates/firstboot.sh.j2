@@ -19,12 +19,18 @@
 # Render-Zeit vs. Laufzeit:
 #   {# Jinja2: {{ var }} / {% if %} #}  -> wird von Ansible beim ISO-Build aufgeloest
 #   ${ }   / $(  )                      -> Bash, wird auf dem Node zur Laufzeit ausgefuehrt
+#
+# Fehlerbehandlung Netzwerk:
+#   Bond/Bridge-Fehler brechen das Script NICHT ab (nur WARNUNG im Log).
+#   Phase 4+5 laufen immer durch - APT kann ggf. noch ueber DHCP-Interface arbeiten.
+#   Konfiguration wird trotzdem geschrieben; nach manuellem Fix genuegt: ifup bond0 vmbr0
 # =============================================================================
 {% raw %}
 set -euo pipefail
 exec > >(tee -a /var/log/pve-firstboot.log) 2>&1
 
 log()  { echo "[firstboot $(date '+%H:%M:%S')] $*"; }
+warn() { echo "[firstboot $(date '+%H:%M:%S')] WARNUNG: $*"; }
 fail() { echo "[firstboot $(date '+%H:%M:%S')] FEHLER: $*" >&2; exit 1; }
 
 log "=== Start (ordering: ${1:-unknown}) ==="
@@ -148,19 +154,25 @@ if [[ -n "${MAC_TO_IFACE[$MAC_LOWER_{{ loop.index }}]:-}" ]]; then
     BOND0_SLAVES+=("${IFACE_{{ loop.index }}}")
     BOND0_ALIASES+=("{{ nic.alias }}")
 else
-    log "  WARNUNG: MAC {{ nic.mac }} ({{ nic.alias }}) nicht gefunden!"
+    warn "MAC {{ nic.mac }} ({{ nic.alias }}) nicht gefunden!"
 {% raw %}    log "  Verfuegbare MACs: ${!MAC_TO_IFACE[*]}"{% endraw %}
 
 fi
 {% endfor %}
 {% raw %}
-[[ ${#BOND0_SLAVES[@]} -lt 1 ]] && \
-    fail "Keine bond0-NIC gefunden! Konfigurierte MACs nicht auf diesem System."
-log "bond0 Slaves: ${BOND0_SLAVES[*]}"
+if [[ ${#BOND0_SLAVES[@]} -lt 1 ]]; then
+    warn "Keine bond0-NIC gefunden! Konfigurierte MACs nicht auf diesem System."
+    warn "Netzwerk-Konfiguration wird NICHT geschrieben. Phase 4+5 laufen weiter."
+    BOND_SETUP_FAILED=1
+else
+    BOND_SETUP_FAILED=0
+    log "bond0 Slaves: ${BOND0_SLAVES[*]}"
+fi
 {% endraw %}
 
 # -- 3c: Persistente udev-Regeln fuer bond0-Slaves ----------------------------
 {% raw %}
+if [[ "${BOND_SETUP_FAILED}" -eq 0 ]]; then
 log "udev-Regeln schreiben: /etc/udev/rules.d/70-pve-nic-aliases.rules"
 mkdir -p /etc/udev/rules.d
 UDEV_RULES_FILE="/etc/udev/rules.d/70-pve-nic-aliases.rules"
@@ -178,10 +190,12 @@ fi
 {% raw %}
 udevadm control --reload-rules
 log "udev-Regeln geschrieben und neu geladen"
+fi  # end BOND_SETUP_FAILED check
 {% endraw %}
 
 # -- 3d: /etc/network/interfaces.d/bond0-vmbr0 schreiben ----------------------
 {% raw %}
+if [[ "${BOND_SETUP_FAILED}" -eq 0 ]]; then
 log "Netzwerkkonfiguration schreiben: /etc/network/interfaces.d/bond0-vmbr0"
 mkdir -p /etc/network/interfaces.d
 grep -q 'source /etc/network/interfaces.d/\*' /etc/network/interfaces || \
@@ -227,19 +241,15 @@ STATIC
     log "  bond-slaves: ${BOND0_SLAVES[*]}"
 }
 write_interfaces_file
-{% endraw %}
 
 # -- 3e: DHCP-Interface deaktivieren -----------------------------------------
-{% raw %}
 if [[ -n "${DHCP_IFACE:-}" ]]; then
     log "DHCP-Interface '${DHCP_IFACE}' deaktivieren"
     sed -i "/^auto ${DHCP_IFACE}$/s/^/# /" /etc/network/interfaces
     sed -i "/^iface ${DHCP_IFACE} inet dhcp/s/^/# /" /etc/network/interfaces
 fi
-{% endraw %}
 
 # -- 3f: Bond + Bridge hochbringen --------------------------------------------
-{% raw %}
 log "bond0-Slaves vorbereiten (flush + down)"
 for slave in "${BOND0_SLAVES[@]}"; do
     ip addr flush dev "$slave" 2>/dev/null || true
@@ -247,29 +257,37 @@ for slave in "${BOND0_SLAVES[@]}"; do
 done
 log "bond0-Slaves, bond0 und vmbr0 hochbringen (ifup)"
 for slave in "${BOND0_SLAVES[@]}"; do
-    ifup "$slave" || log "  WARNUNG: ifup $slave fehlgeschlagen"
+    ifup "$slave" || warn "ifup $slave fehlgeschlagen"
 done
-ifup bond0  || fail "ifup bond0 fehlgeschlagen"
-ifup vmbr0  || fail "ifup vmbr0 fehlgeschlagen"
+ifup bond0  || warn "ifup bond0 fehlgeschlagen - LACP-Negotiation ggf. noch ausstehend"
+ifup vmbr0  || warn "ifup vmbr0 fehlgeschlagen - Konfiguration ist geschrieben, nach Reboot aktiv"
 
-log "Warte auf LACP-Negotiation (max 10s)"
-for i in $(seq 1 10); do
-    if ip link show bond0 | grep -q 'state UP'; then
+log "Warte auf LACP-Negotiation (max 30s)"
+BOND_UP=0
+for i in $(seq 1 30); do
+    if ip link show bond0 2>/dev/null | grep -q 'state UP'; then
         log "bond0 ist UP nach ${i}s"
+        BOND_UP=1
         break
     fi
     sleep 1
 done
-{% endraw %}
+[[ "${BOND_UP}" -eq 0 ]] && warn "bond0 nach 30s noch nicht UP - Switch-LACP pruefen!"
 
+{% endraw %}
 if ping -c 2 -W 2 "{{ pve_node_gw }}" >/dev/null 2>&1; then
     log "Gateway {{ pve_node_gw }} erreichbar - Netzwerk OK"
 else
-    log "WARNUNG: Gateway {{ pve_node_gw }} nicht erreichbar."
+    warn "Gateway {{ pve_node_gw }} nicht erreichbar."
 {% raw %}    log "  Bond0-Status: $(cat /proc/net/bonding/bond0 2>/dev/null | grep 'MII Status' | head -2)"{% endraw %}
 
 fi
+{% raw %}
+else
+    warn "=== Phase 3 uebersprungen (keine NICs gefunden) - Netzwerk manuell konfigurieren! ==="
+fi  # end BOND_SETUP_FAILED check
 
+{% endraw %}
 log "=== Phase 3 abgeschlossen: bond0/vmbr0 auf {{ pve_node_ip }}/{{ pve_node_cidr_prefix }} ==="
 
 # =============================================================================
@@ -283,8 +301,7 @@ DEBIAN_FRONTEND=noninteractive apt-get install -y \
     ifenslave \
     ethtool \
 {% endraw %}
-    {{ (pve_extra_packages | default(['lldpd'])) | join(' \\
-    ') }}
+    {{ (pve_extra_packages | default(['lldpd'])) | join(' \\\n    ') }}
 
 # =============================================================================
 # Phase 5: Post-Network-Tasks
